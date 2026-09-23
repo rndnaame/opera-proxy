@@ -986,6 +986,100 @@ remove_opera_proxy() {
 }
 
 # ---------------------------------------------------------------------------
+# [99] Обновить скрипт меню
+# ---------------------------------------------------------------------------
+update_menu_script() {
+  print_banner
+  printf '%b\n' "${bold}[99] Обновление скрипта меню${reset}"
+  echo ""
+  echo "Источник: $SCRIPT_URL"
+  echo ""
+
+  TMP="/tmp/menu-opera.sh.new"
+  rm -f "$TMP"
+
+  _dl_ok=0
+  for _u in "$SCRIPT_URL" $SCRIPT_URL_MIRRORS; do
+    echo "→ Скачивание: $_u"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL --connect-timeout 15 --max-time 60 -o "$TMP" "$_u" 2>/dev/null && _dl_ok=1
+    fi
+    if [ "$_dl_ok" != "1" ] && command -v wget >/dev/null 2>&1; then
+      wget -q -T 30 -O "$TMP" "$_u" 2>/dev/null && _dl_ok=1
+    fi
+    [ -s "$TMP" ] && head -1 "$TMP" | grep -q '^#!' && _dl_ok=1
+    [ "$_dl_ok" = "1" ] && [ -s "$TMP" ] && break
+    rm -f "$TMP"
+    _dl_ok=0
+  done
+
+  if [ ! -s "$TMP" ] || ! head -1 "$TMP" | grep -q '^#!'; then
+    echo "❌ Не удалось скачать актуальный скрипт"
+    rm -f "$TMP"
+    return 1
+  fi
+
+  # Куда ставить
+  DEST=""
+  case "$0" in
+    /*)
+      if [ -f "$0" ] && [ -w "$0" ]; then
+        DEST="$0"
+      fi
+      ;;
+    ./*|*)
+      if [ -f "$0" ] && [ -w "$0" ]; then
+        DEST="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+      fi
+      ;;
+  esac
+
+  # Типичные пути, если запуск через curl|sh или $0 не файл
+  if [ -z "$DEST" ] || [ ! -f "$DEST" ]; then
+    for _try in \
+      /opt/bin/menu-opera.sh \
+      /opt/sbin/menu-opera.sh \
+      /opt/etc/menu-opera.sh \
+      ./menu-opera.sh
+    do
+      if [ -f "$_try" ] && [ -w "$_try" ]; then
+        DEST="$_try"
+        break
+      fi
+    done
+  fi
+
+  if [ -z "$DEST" ] || [ ! -f "$DEST" ]; then
+    # Сохраняем в /opt/bin по умолчанию
+    mkdir -p /opt/bin 2>/dev/null || true
+    DEST="/opt/bin/menu-opera.sh"
+    echo "→ Файл скрипта не найден — установка в $DEST"
+  else
+    echo "→ Обновление: $DEST"
+    if cmp -s "$TMP" "$DEST" 2>/dev/null; then
+      echo "✅ Уже актуальная версия"
+      rm -f "$TMP"
+      return 0
+    fi
+  fi
+
+  chmod +x "$TMP"
+  if mv -f "$TMP" "$DEST"; then
+    chmod +x "$DEST"
+    echo "✅ Скрипт обновлён: $DEST"
+    echo ""
+    if [ "$(yes_no "Перезапустить меню сейчас? [Y/n]: " "y")" = "1" ]; then
+      echo "→ Перезапуск..."
+      exec sh "$DEST"
+    fi
+  else
+    echo "❌ Не удалось записать $DEST"
+    rm -f "$TMP"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Главное меню
 # ---------------------------------------------------------------------------
 run_menu() {
@@ -1002,10 +1096,11 @@ run_menu() {
     echo "  [5]  Остановить / Запустить сервис"
     echo "  [6]  Проверить прокси"
     echo "  [88] Удалить"
+    echo "  [99] Обновить скрипт"
     echo "  [0]  Выход"
     echo ""
 
-    choice=$(ask "Выбор [0-6 / 88], Enter = выход: " "0")
+    choice=$(ask "Выбор [0-6 / 88 / 99], Enter = выход: " "0")
     case "$choice" in
       1)
         install_opera_menu
@@ -1033,6 +1128,10 @@ run_menu() {
         ;;
       88)
         remove_opera_proxy
+        ask "Нажмите Enter для возврата в меню... " ""
+        ;;
+      99)
+        update_menu_script
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
       0|n|N|q|Q|"")
