@@ -1,0 +1,392 @@
+name: Compress opera-proxy
+
+on:
+  schedule:
+    # каждые 12 часов
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y upx-ucl curl wget jq
+
+      - name: Check versions and compress if needed
+        id: build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          MIRROR="https://sw.ext.io/ent"
+          OUR_REPO="${{ github.repository }}"
+          ROLLING_TAG="compressed"
+          UPSTREAM_REPO="Alexey71/opera-proxy"
+          mkdir -p out work
+
+          {
+            echo "skip=true"
+            echo "refresh_latest=false"
+            echo "op_ver="
+            echo "op_tag="
+            echo "op_name="
+            echo "rolling_name=Latest"
+          } >> "$GITHUB_OUTPUT"
+
+          upx_fast() {
+            f="$1"
+            echo "  UPX: $(basename "$f") ($(du -h "$f" | awk '{print $1}')) ..."
+            if timeout 240 upx -9 --lzma --force "$f" 2>&1; then
+              echo "  OK lzma: $(du -h "$f" | awk '{print $1}')"
+              return 0
+            fi
+            echo "  lzma timeout/fail → пробуем -9"
+            if timeout 120 upx -9 --force "$f" 2>&1; then
+              echo "  OK -9: $(du -h "$f" | awk '{print $1}')"
+              return 0
+            fi
+            echo "  UPX не успел — оставляем без сжатия"
+            return 0
+          }
+
+          # Архитектуры: путь_на_зеркале | суффикс_в_имени_ipk
+          # aarch64 → opera-proxy_X.Y.Z-N_aarch64-3.10.ipk
+          # mipsel  → opera-proxy_X.Y.Z-N_mipsel-3.4.ipk
+          # mips    → opera-proxy_X.Y.Z-N_mips-3.4.ipk
+          echo "== Версии на sw.ext.io =="
+          : > /tmp/wanted.txt
+          : > /tmp/wanted_src.txt
+          OP_VER=""
+
+          for pair in "aarch64|aarch64-3.10" "mipsel|mipsel-3.4" "mips|mips-3.4"; do
+            path="${pair%%|*}"
+            suffix="${pair##*|}"
+            ipk=$(curl -sL "$MIRROR/$path/" \
+              | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${suffix}\\.ipk" \
+              | sort -V | tail -1 || true)
+            if [ -z "$ipk" ]; then
+              echo "  skip mirror $path (пакет не найден)"
+              continue
+            fi
+            # итоговое имя: opera-proxy_1.29.0-1_aarch64-3.10_compressed.ipk
+            want="${ipk%.ipk}_compressed.ipk"
+            echo "  IPK: $ipk => $want"
+            echo "$want" >> /tmp/wanted.txt
+            echo "${path}|${ipk}|${want}" >> /tmp/wanted_src.txt
+            v=$(echo "$ipk" | sed -n 's/^opera-proxy_\([^_]*\)_.*/\1/p')
+            [ -n "$v" ] && OP_VER="$v"
+          done
+          sort -u /tmp/wanted.txt -o /tmp/wanted.txt
+          cp /tmp/wanted.txt wanted.txt
+
+          if [ -z "$OP_VER" ]; then
+            echo "❌ Не удалось определить версию opera-proxy на зеркале"
+            exit 1
+          fi
+
+          OP_NAME="v${OP_VER} (opera-proxy UPX)"
+          # тег топик-релиза: op-1.29.0-1
+          OP_TAG=$(echo "op-${OP_VER}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          ROLLING_NAME="Latest"
+
+          echo "op_ver=$OP_VER" >> "$GITHUB_OUTPUT"
+          echo "op_tag=$OP_TAG" >> "$GITHUB_OUTPUT"
+          echo "op_name=$OP_NAME" >> "$GITHUB_OUTPUT"
+          echo "rolling_name=$ROLLING_NAME" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "== Ассеты rolling «${ROLLING_TAG}» =="
+          : > /tmp/existing.txt
+          API_JSON=$(curl -sL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OUR_REPO}/releases/tags/${ROLLING_TAG}" || true)
+          if echo "$API_JSON" | jq -e '.assets' >/dev/null 2>&1; then
+            echo "$API_JSON" | jq -r '.assets[].name' >> /tmp/existing.txt
+          else
+            HTML=$(curl -sL "https://github.com/${OUR_REPO}/releases/expanded_assets/${ROLLING_TAG}" || true)
+            echo "$HTML" | grep -oE 'releases/download/[^"]+' | sed 's|.*/||' >> /tmp/existing.txt || true
+          fi
+          grep -v '^$' /tmp/existing.txt | sort -u > /tmp/e2 && mv /tmp/e2 /tmp/existing.txt
+          sed 's/^/  • /' /tmp/existing.txt 2>/dev/null || echo "  (пусто)"
+
+          : > /tmp/todo.txt
+          NEED=0
+          while read -r want; do
+            [ -n "$want" ] || continue
+            if grep -qxF "$want" /tmp/existing.txt; then
+              echo "  SKIP: $want"
+            else
+              echo "  BUILD: $want"
+              echo "$want" >> /tmp/todo.txt
+              NEED=1
+            fi
+          done < /tmp/wanted.txt
+
+          # Changelog из upstream Alexey71/opera-proxy
+          # Версия пакета: 1.29.0-1 → тег v1.29.0 (без -N revision)
+          fetch_official_cl() {
+            _ver_full="$1"
+            _ver_base=$(echo "$_ver_full" | sed 's/-[0-9][0-9]*$//')
+            _tag="v${_ver_base}"
+            _url="https://github.com/${UPSTREAM_REPO}/releases/tag/${_tag}"
+            _json=$(curl -sL \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/releases/tags/${_tag}" || true)
+            _body=$(echo "$_json" | jq -r '.body // empty' 2>/dev/null || true)
+            if [ -z "$_body" ] || [ "$_body" = "null" ]; then
+              _json=$(curl -sL \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${UPSTREAM_REPO}/releases/tags/${_tag}" || true)
+              _body=$(echo "$_json" | jq -r '.body // empty' 2>/dev/null || true)
+            fi
+            # fallback: latest release body, если точный тег не найден
+            if [ -z "$_body" ] || [ "$_body" = "null" ]; then
+              _json=$(curl -sL \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" || true)
+              _latest_tag=$(echo "$_json" | jq -r '.tag_name // empty' 2>/dev/null || true)
+              _body=$(echo "$_json" | jq -r '.body // empty' 2>/dev/null || true)
+              if [ -n "$_latest_tag" ]; then
+                _url="https://github.com/${UPSTREAM_REPO}/releases/tag/${_latest_tag}"
+              fi
+            fi
+            if [ -n "$_body" ] && [ "$_body" != "null" ]; then
+              echo "$_body"
+              echo ""
+              echo "— Источник: ${_url}"
+            else
+              echo "Официальный changelog: ${_url}"
+            fi
+          }
+
+          {
+            echo "UPX-сборка **opera-proxy** из [sw.ext.io](${MIRROR})."
+            echo ""
+            echo "- Версия пакета: **${OP_VER}**"
+            echo "- Тег: \`${OP_TAG}\`"
+            echo ""
+            echo "### Changelog (upstream)"
+            echo ""
+            fetch_official_cl "$OP_VER"
+          } > release-body-op.md
+
+          {
+            echo "Крайние UPX-версии opera-proxy:"
+            echo ""
+            echo "- opera-proxy: **${OP_VER}** → \`${OP_TAG}\`"
+            echo ""
+            echo "Источник IPK: ${MIRROR}"
+            echo ""
+            echo "### Changelog opera-proxy ${OP_VER}"
+            echo ""
+            fetch_official_cl "$OP_VER"
+          } > release-body-rolling.md
+
+          if [ "$NEED" -eq 0 ]; then
+            echo ">>> Сжимать нечего (файлы уже в ${ROLLING_TAG})"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "refresh_latest=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "refresh_latest=false" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "== Сборка недостающего =="
+          while IFS='|' read -r path ipk want; do
+            [ -n "$want" ] || continue
+            grep -qxF "$want" /tmp/todo.txt || continue
+
+            echo "IPK: $ipk"
+            wget -q -O "work/$ipk" "$MIRROR/$path/$ipk"
+            [ -s "work/$ipk" ] || { echo "  ❌ скачивание не удалось"; continue; }
+
+            rm -rf work/repack
+            mkdir -p work/repack/control work/repack/data
+            (
+              cd work/repack
+              tar -xzf "../$ipk"
+              tar -xzf control.tar.gz -C control 2>/dev/null || true
+              tar -xzf data.tar.gz -C data 2>/dev/null || true
+
+              # Сжимаем бинарники (не shell-скрипты)
+              find data -type f \( -executable -o -name 'opera-proxy' \) 2>/dev/null | while read -r f; do
+                [ -f "$f" ] || continue
+                head2=$(head -c 2 "$f" 2>/dev/null || true)
+                [ "$head2" = "#!" ] && continue
+                # ELF magic
+                magic=$(head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)
+                case "$magic" in
+                  7f454c46*) ;;  # ELF
+                  *) continue ;;
+                esac
+                echo "  compress: $f"
+                timeout 240 upx -9 --lzma --force "$f" 2>/dev/null \
+                  || timeout 120 upx -9 --force "$f" 2>/dev/null \
+                  || true
+              done
+
+              tar -czf control.tar.gz -C control .
+              tar -czf data.tar.gz -C data .
+              echo "2.0" > debian-binary
+              tar -czf "../../out/$want" debian-binary control.tar.gz data.tar.gz
+            )
+            ls -lh "out/$want" 2>/dev/null || echo "  ⚠ не собран: $want"
+          done < /tmp/wanted_src.txt
+
+          echo ""
+          echo "== Результат сборки =="
+          ls -lh out/ 2>/dev/null || true
+
+          HAS=0
+          ls out/*.ipk >/dev/null 2>&1 && HAS=1
+          if [ "$HAS" -eq 0 ]; then
+            echo ">>> Нет собранных файлов — публикация отменена"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish version topic (архив)
+        if: steps.build.outputs.skip != 'true' && steps.build.outputs.op_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.build.outputs.op_tag }}
+          name: ${{ steps.build.outputs.op_name }}
+          body_path: release-body-op.md
+          files: out/*
+          fail_on_unmatched_files: false
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare full Latest asset set
+        if: steps.build.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OUR_REPO="${{ github.repository }}"
+          TAG="compressed"
+          mkdir -p out/latest
+          cp -n out/*.ipk out/latest/ 2>/dev/null || true
+
+          JSON=$(curl -sL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OUR_REPO}/releases/tags/${TAG}" || true)
+
+          if [ -f wanted.txt ] && echo "$JSON" | jq -e '.assets' >/dev/null 2>&1; then
+            while read -r want; do
+              [ -n "$want" ] || continue
+              [ -f "out/latest/$want" ] && continue
+              url=$(echo "$JSON" | jq -r --arg n "$want" '.assets[] | select(.name==$n) | .browser_download_url' | head -1)
+              if [ -n "$url" ] && [ "$url" != "null" ]; then
+                echo "  + из старого $TAG: $want"
+                curl -sL -o "out/latest/$want" \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  -H "Accept: application/octet-stream" \
+                  "$url" || true
+              fi
+            done < wanted.txt
+          fi
+
+          # Удаляем устаревшие ассеты (другие версии) — в Latest только текущие wanted
+          if [ -f wanted.txt ]; then
+            for f in out/latest/*; do
+              [ -f "$f" ] || continue
+              bn=$(basename "$f")
+              if ! grep -qxF "$bn" wanted.txt; then
+                echo "  − устарел: $bn"
+                rm -f "$f"
+              fi
+            done
+          fi
+
+          ls -lh out/latest/ 2>/dev/null || true
+
+          # Удаляем старый rolling-релиз, чтобы published_at был свежим
+          RID=$(echo "$JSON" | jq -r '.id // empty')
+          if [ -n "$RID" ]; then
+            echo "Удаляем старый $TAG (id=$RID)..."
+            curl -sL -X DELETE \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${OUR_REPO}/releases/${RID}" || true
+            sleep 2
+          fi
+
+      - name: Publish Latest (compressed)
+        if: steps.build.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: compressed
+          name: ${{ steps.build.outputs.rolling_name }}
+          body_path: release-body-rolling.md
+          files: out/latest/*
+          fail_on_unmatched_files: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Когда сжимать нечего — обновляем body и pin Latest
+      - name: Refresh Latest body and pin as latest
+        if: steps.build.outputs.refresh_latest == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OUR_REPO="${{ github.repository }}"
+          TAG="compressed"
+          [ -f release-body-rolling.md ] || { echo "no body"; exit 0; }
+
+          JSON=$(curl -sL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OUR_REPO}/releases/tags/${TAG}" || true)
+          RID=$(echo "$JSON" | jq -r '.id // empty')
+          if [ -z "$RID" ]; then
+            echo "Релиза $TAG нет — нечего обновлять"
+            exit 0
+          fi
+
+          mkdir -p out/latest
+          echo "$JSON" | jq -c '.assets[]?' | while read -r row; do
+            name=$(echo "$row" | jq -r '.name')
+            url=$(echo "$row" | jq -r '.browser_download_url')
+            echo "  скачиваем $name"
+            curl -sL -o "out/latest/$name" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              "$url" || true
+          done
+
+          echo "Удаляем $TAG (id=$RID)..."
+          curl -sL -X DELETE \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OUR_REPO}/releases/${RID}"
+          sleep 2
+
+      - name: Re-publish compressed after refresh
+        if: steps.build.outputs.refresh_latest == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: compressed
+          name: ${{ steps.build.outputs.rolling_name }}
+          body_path: release-body-rolling.md
+          files: out/latest/*
+          fail_on_unmatched_files: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
