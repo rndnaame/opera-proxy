@@ -146,8 +146,26 @@ show_status() {
 # ---------------------------------------------------------------------------
 # Общие: Proxy0 + проверка туннеля
 # ---------------------------------------------------------------------------
+proxy0_exists() {
+  # t2s0 или интерфейс Proxy0 уже есть — повторно создавать не нужно
+  if ip link show t2s0 >/dev/null 2>&1; then
+    return 0
+  fi
+  if ifconfig t2s0 >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v ndmc >/dev/null 2>&1; then
+    ndmc -c "show interface Proxy0" 2>/dev/null | grep -qi 'Proxy0\|interface' && return 0
+  fi
+  return 1
+}
+
 configure_proxy0() {
   echo ""
+  if proxy0_exists; then
+    echo "→ Proxy0 / t2s0 уже есть — настройку интерфейса пропускаем"
+    return 0
+  fi
   echo "→ Настройка интерфейса Proxy0 (t2s0) через ndmc ..."
   if command -v ndmc >/dev/null 2>&1; then
     ndmc -c "interface Proxy0" 2>/dev/null || true
@@ -184,25 +202,39 @@ check_tunnel_quick() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# [1] Установить Opera-proxy (официальный, sw.ext.io)
-# ---------------------------------------------------------------------------
-install_opera_proxy() {
-  print_banner
-  printf '%b\n' "${bold}[1] Установка Opera-proxy (официальный)${reset}"
-  echo ""
+# Версия на sw.ext.io (для ARCH)
+fetch_mirror_ver() {
+  _arch="$1"
+  curl -sL --connect-timeout 10 --max-time 20 "https://sw.ext.io/ent/${_arch}/" 2>/dev/null \
+    | grep -oE "opera-proxy_[0-9][^\"'<> ]+_" \
+    | sed 's/^opera-proxy_//;s/_$//' \
+    | sort -V | tail -1
+}
 
-  detect_arch
-  if [ -z "$ARCH" ]; then
-    echo "❌ Неизвестная архитектура. Нужны: aarch64 / mipsel / mips"
-    opkg print-architecture 2>/dev/null || true
-    return 1
+# Версия UPX-релиза (rndnaame/opera-proxy)
+fetch_upx_meta() {
+  # выставляет UPX_VER, UPX_TAG, UPX_IPK (для текущего IPK_SUFFIX)
+  UPX_VER=""; UPX_TAG=""; UPX_IPK=""
+  _html=$(curl -sL --connect-timeout 15 --max-time 30 \
+    "https://github.com/rndnaame/opera-proxy/releases/latest" 2>/dev/null || true)
+  [ -z "$_html" ] && _html=$(curl -sL --connect-timeout 15 --max-time 30 \
+    "https://ghfast.top/https://github.com/rndnaame/opera-proxy/releases/latest" 2>/dev/null || true)
+  UPX_TAG=$(echo "$_html" | grep -oE 'releases/tag/op-[0-9][^\"'\''<> /]+' | head -1 | sed 's|releases/tag/||')
+  UPX_IPK=$(echo "$_html" | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}_compressed\\.ipk" | head -1)
+  if [ -z "$UPX_IPK" ] && [ -n "$UPX_TAG" ]; then
+    _html2=$(curl -sL --connect-timeout 15 --max-time 30 \
+      "https://github.com/rndnaame/opera-proxy/releases/expanded_assets/${UPX_TAG}" 2>/dev/null || true)
+    UPX_IPK=$(echo "$_html2" | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}_compressed\\.ipk" | head -1)
   fi
+  [ -n "$UPX_IPK" ] && UPX_VER=$(echo "$UPX_IPK" | sed -n "s/^opera-proxy_\([^_]*\)_.*/\1/p")
+  [ -z "$UPX_VER" ] && [ -n "$UPX_TAG" ] && UPX_VER=$(echo "$UPX_TAG" | sed 's/^op-//')
+}
 
-  echo "Архитектура: $A → $ARCH"
+# ---------------------------------------------------------------------------
+# [1] Установить Opera-proxy (подменю)
+# ---------------------------------------------------------------------------
+do_install_official() {
   echo ""
-
-  # Репозиторий
   echo "→ Добавление репозитория sw.ext.io ..."
   mkdir -p /opt/etc/opkg
   echo "src/gz sw http://sw.ext.io/ent/$ARCH" > /opt/etc/opkg/sw.ext.io.conf
@@ -210,100 +242,54 @@ install_opera_proxy() {
 
   echo ""
   echo "→ opkg update ..."
-  opkg update || {
-    echo "⚠ opkg update завершился с ошибкой (продолжаем)"
-  }
+  opkg update || echo "⚠ opkg update завершился с ошибкой (продолжаем)"
 
   echo ""
-  echo "→ Установка пакета opera-proxy ..."
-  if opkg install opera-proxy; then
-    echo "✅ Пакет установлен"
+  if opkg list-installed 2>/dev/null | grep -q '^opera-proxy '; then
+    echo "→ Обновление пакета opera-proxy (без переустановки) ..."
   else
-    echo "❌ Не удалось установить opera-proxy"
+    echo "→ Установка пакета opera-proxy ..."
+  fi
+  # без --force-reinstall: opkg сам обновит, не удаляя «с нуля»
+  if opkg install opera-proxy; then
+    echo "✅ Готово"
+  else
+    echo "❌ Не удалось установить/обновить opera-proxy"
     return 1
   fi
 
   echo ""
   echo "→ Запуск сервиса ..."
-  /opt/etc/init.d/S99opera-proxy start 2>/dev/null || true
+  /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
+    || /opt/etc/init.d/S99opera-proxy start 2>/dev/null || true
   sleep 2
 
   configure_proxy0
   check_tunnel_quick
-
   echo ""
-  echo "=== Установка завершена ==="
+  echo "=== Готово ==="
 }
 
-# ---------------------------------------------------------------------------
-# [2] Установить Opera-proxy UPX (сжатый, GitHub)
-# ---------------------------------------------------------------------------
-install_opera_compressed() {
-  print_banner
-  printf '%b\n' "${bold}[2] Установка Opera-proxy UPX (сжатый)${reset}"
+do_install_upx() {
   echo ""
-
-  detect_arch
-  if [ -z "$ARCH" ]; then
-    echo "❌ Неизвестная архитектура. Нужны: aarch64 / mipsel / mips"
-    opkg print-architecture 2>/dev/null || true
-    return 1
-  fi
-
-  case "$ARCH" in
-    aarch64) IPK_SUFFIX="aarch64-3.10" ;;
-    mipsel)  IPK_SUFFIX="mipsel-3.4" ;;
-    mips)    IPK_SUFFIX="mips-3.4" ;;
-    *)
-      echo "❌ Нет сжатого IPK для архитектуры: $ARCH"
-      return 1
-      ;;
-  esac
-
-  echo "Архитектура: $A → $ARCH ($IPK_SUFFIX)"
-  echo "Источник: https://github.com/rndnaame/opera-proxy/releases"
-  echo ""
-
-  # Найти последний релиз (make_latest) и IPK под архитектуру
   echo "→ Поиск сжатого IPK ..."
-  _html=$(curl -sL --connect-timeout 15 --max-time 30 \
-    "https://github.com/rndnaame/opera-proxy/releases/latest" 2>/dev/null || true)
-  if [ -z "$_html" ]; then
-    _html=$(curl -sL --connect-timeout 15 --max-time 30 \
-      "https://ghfast.top/https://github.com/rndnaame/opera-proxy/releases/latest" 2>/dev/null || true)
-  fi
-
-  # tag из URL вида /releases/tag/op-1.29.0-1
-  REL_TAG=$(echo "$_html" | grep -oE 'releases/tag/op-[0-9][^\"'\''<> /]+' | head -1 | sed 's|releases/tag/||')
-  IPK_NAME=$(echo "$_html" | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}_compressed\\.ipk" | head -1)
-
-  # fallback: страница конкретного тега / expanded_assets
-  if [ -z "$IPK_NAME" ] && [ -n "$REL_TAG" ]; then
-    _html2=$(curl -sL --connect-timeout 15 --max-time 30 \
-      "https://github.com/rndnaame/opera-proxy/releases/expanded_assets/${REL_TAG}" 2>/dev/null || true)
-    IPK_NAME=$(echo "$_html2" | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}_compressed\\.ipk" | head -1)
-  fi
-
-  if [ -z "$IPK_NAME" ] || [ -z "$REL_TAG" ]; then
+  fetch_upx_meta
+  if [ -z "$UPX_IPK" ] || [ -z "$UPX_TAG" ]; then
     echo "❌ Сжатый IPK для $IPK_SUFFIX не найден"
-    echo "   Проверьте: https://github.com/rndnaame/opera-proxy/releases"
+    echo "   https://github.com/rndnaame/opera-proxy/releases"
     return 1
   fi
+  echo "   Релиз: $UPX_TAG"
+  echo "   Найден: $UPX_IPK"
 
-  echo "   Релиз: $REL_TAG"
-  echo "   Найден: $IPK_NAME"
-  URL="https://github.com/rndnaame/opera-proxy/releases/download/${REL_TAG}/${IPK_NAME}"
-  TMP_IPK="/tmp/${IPK_NAME}"
+  URL="https://github.com/rndnaame/opera-proxy/releases/download/${UPX_TAG}/${UPX_IPK}"
+  TMP_IPK="/tmp/${UPX_IPK}"
 
   echo ""
   echo "→ Скачивание ..."
   rm -f "$TMP_IPK"
   _dl_ok=0
-  for _try_url in \
-    "$URL" \
-    "https://ghfast.top/${URL}" \
-    "https://gh-proxy.com/${URL}"
-  do
+  for _try_url in "$URL" "https://ghfast.top/${URL}" "https://gh-proxy.com/${URL}"; do
     echo "   ↻ $_try_url"
     if command -v curl >/dev/null 2>&1; then
       curl -fL --connect-timeout 15 --max-time 120 -o "$TMP_IPK" "$_try_url" 2>/dev/null && _dl_ok=1
@@ -317,40 +303,115 @@ install_opera_compressed() {
   done
 
   if [ ! -s "$TMP_IPK" ]; then
-    echo "❌ Не удалось скачать $IPK_NAME"
+    echo "❌ Не удалось скачать $UPX_IPK"
     return 1
   fi
   echo "   ✓ $(du -h "$TMP_IPK" | awk '{print $1}')"
 
   echo ""
-  echo "→ Установка $IPK_NAME ..."
-  if opkg install --force-reinstall "$TMP_IPK" 2>/dev/null || opkg install "$TMP_IPK"; then
-    echo "✅ Пакет установлен (UPX)"
+  if opkg list-installed 2>/dev/null | grep -q '^opera-proxy '; then
+    echo "→ Обновление $UPX_IPK (без force-reinstall) ..."
   else
-    echo "❌ opkg install не удался"
-    rm -f "$TMP_IPK"
-    return 1
+    echo "→ Установка $UPX_IPK ..."
+  fi
+  # обычный install: при новой версии — upgrade; при той же — opkg может отказать
+  if opkg install "$TMP_IPK"; then
+    echo "✅ Готово (UPX)"
+  else
+    # та же версия — мягкая переустановка только по согласию не делаем; пробуем --force-reinstall
+    # только если версии совпали и install отказал
+    echo "⚠ Обычная установка не прошла, пробуем обновление пакета ..."
+    if opkg install --force-reinstall "$TMP_IPK"; then
+      echo "✅ Готово (UPX, reinstall)"
+    else
+      echo "❌ opkg install не удался"
+      rm -f "$TMP_IPK"
+      return 1
+    fi
   fi
   rm -f "$TMP_IPK"
 
   echo ""
   echo "→ Запуск сервиса ..."
-  /opt/etc/init.d/S99opera-proxy start 2>/dev/null || true
+  /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
+    || /opt/etc/init.d/S99opera-proxy start 2>/dev/null || true
   sleep 2
 
   configure_proxy0
   check_tunnel_quick
+  echo ""
+  echo "=== Готово ==="
+}
+
+install_opera_menu() {
+  print_banner
+  printf '%b\n' "${bold}[1] Установить Opera-proxy${reset}"
+  echo ""
+
+  detect_arch
+  detect_installed
+  if [ -z "$ARCH" ]; then
+    echo "❌ Неизвестная архитектура. Нужны: aarch64 / mipsel / mips"
+    opkg print-architecture 2>/dev/null || true
+    return 1
+  fi
+
+  case "$ARCH" in
+    aarch64) IPK_SUFFIX="aarch64-3.10" ;;
+    mipsel)  IPK_SUFFIX="mipsel-3.4" ;;
+    mips)    IPK_SUFFIX="mips-3.4" ;;
+    *) IPK_SUFFIX="" ;;
+  esac
+
+  echo "Архитектура: $A → $ARCH"
+  if [ -n "$CUR_VER" ]; then
+    echo "Сейчас установлено: $CUR_VER"
+  else
+    echo "Сейчас установлено: нет"
+  fi
+  echo ""
+
+  echo "→ Определение доступных версий ..."
+  MIRROR_VER=$(fetch_mirror_ver "$ARCH")
+  fetch_upx_meta
 
   echo ""
-  echo "=== Установка сжатой версии завершена ==="
+  printf '%b\n' "${yellow}Доступные версии для установки:${reset}"
+  echo ""
+  if [ -n "$MIRROR_VER" ]; then
+    echo "  [1]  С репозитория sw.ext.io   (${MIRROR_VER})"
+  else
+    echo "  [1]  С репозитория sw.ext.io   (версия не определена)"
+  fi
+  if [ -n "$UPX_VER" ]; then
+    echo "  [2]  Сжатая версия UPX         (${UPX_VER})"
+  else
+    echo "  [2]  Сжатая версия UPX         (не найдена)"
+  fi
+  echo "  [0]  Назад"
+  echo ""
+
+  sub=$(ask "Выбор [0-2]: " "0")
+  case "$sub" in
+    1) do_install_official ;;
+    2)
+      if [ -z "$IPK_SUFFIX" ]; then
+        echo "❌ Нет сжатого IPK для архитектуры: $ARCH"
+        return 1
+      fi
+      do_install_upx
+      ;;
+    0|"") echo "→ Назад" ;;
+    *) echo "Неверный выбор." ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
-# [3] Обновить Opera-proxy (opkg)
+# [2] Обновить Opera-proxy (opkg)
 # ---------------------------------------------------------------------------
 upgrade_opera_proxy() {
   print_banner
-  printf '%b\n' "${bold}[3] Обновление Opera-proxy (opkg)${reset}"
+  printf '%b\n' "${bold}[2] Обновление Opera-proxy (opkg)${reset}"
   echo ""
 
   if ! opkg list-installed 2>/dev/null | grep -q '^opera-proxy '; then
@@ -389,11 +450,11 @@ upgrade_opera_proxy() {
 }
 
 # ---------------------------------------------------------------------------
-# [4] Обновление Bin Opera-Proxy из GitHub
+# [3] Обновление Bin Opera-Proxy из GitHub
 # ---------------------------------------------------------------------------
 update_opera_bin() {
   print_banner
-  printf '%b\n' "${bold}[4] Обновление opera-proxy из GitHub${reset}"
+  printf '%b\n' "${bold}[3] Обновление opera-proxy из GitHub${reset}"
   echo ""
 
   INSTALL_PATH="/opt/sbin/opera-proxy"
@@ -484,11 +545,11 @@ update_opera_bin() {
 }
 
 # ---------------------------------------------------------------------------
-# [5] Fix Opera (+socks5)
+# [4] Fix Opera (+socks5)
 # ---------------------------------------------------------------------------
 fix_opera() {
   print_banner
-  printf '%b\n' "${bold}[5] Fix Opera (+socks5)${reset}"
+  printf '%b\n' "${bold}[4] Fix Opera (+socks5)${reset}"
   echo ""
 
   if [ -f /opt/fix_opera_tunnel.sh ]; then
@@ -589,11 +650,11 @@ CRON
 }
 
 # ---------------------------------------------------------------------------
-# [6] Остановить / Запустить сервис
+# [5] Остановить / Запустить сервис
 # ---------------------------------------------------------------------------
 toggle_service() {
   print_banner
-  printf '%b\n' "${bold}[6] Управление сервисом opera-proxy${reset}"
+  printf '%b\n' "${bold}[5] Управление сервисом opera-proxy${reset}"
   echo ""
 
   if [ ! -x /opt/etc/init.d/S99opera-proxy ]; then
@@ -631,11 +692,11 @@ toggle_service() {
 }
 
 # ---------------------------------------------------------------------------
-# [7] Проверить прокси
+# [6] Проверить прокси
 # ---------------------------------------------------------------------------
 check_proxy() {
   print_banner
-  printf '%b\n' "${bold}[7] Проверка прокси (через t2s0)${reset}"
+  printf '%b\n' "${bold}[6] Проверка прокси (через t2s0)${reset}"
   echo ""
 
   detect_installed
@@ -647,7 +708,7 @@ check_proxy() {
     printf "   Интерфейс t2s0 : %bDOWN / отсутствует%b\n" "$red" "$reset"
     echo ""
     echo "⚠ Без активного t2s0 проверка через Proxy0 невозможна."
-    echo "   Включите Proxy0 или выполните Fix (пункт 5)."
+    echo "   Включите Proxy0 или выполните Fix (пункт 4)."
     return 1
   fi
 
@@ -655,6 +716,37 @@ check_proxy() {
     printf "   Сервис         : %bзапущен%b\n" "$green" "$reset"
   else
     printf "   Сервис         : %bостановлен%b\n" "$yellow" "$reset"
+  fi
+
+  # Параметры запуска opera-proxy
+  echo ""
+  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
+  printf '%b\n' "${bold}  Параметры opera-proxy${reset}"
+  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
+  if [ -f /opt/etc/opera-proxy.conf ]; then
+    echo ""
+    echo "  Конфиг: /opt/etc/opera-proxy.conf"
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      [ -z "$_line" ] && continue
+      echo "    $_line"
+    done < /opt/etc/opera-proxy.conf
+  else
+    echo ""
+    echo "  Конфиг: нет (/opt/etc/opera-proxy.conf)"
+  fi
+  # Фактическая командная строка процесса
+  _cmdline=""
+  _pid=$(pgrep -f "[o]pera-proxy" 2>/dev/null | head -1)
+  if [ -n "$_pid" ] && [ -r "/proc/$_pid/cmdline" ]; then
+    _cmdline=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')
+  fi
+  if [ -z "$_cmdline" ]; then
+    _cmdline=$(ps w 2>/dev/null | grep "[o]pera-proxy" | head -1 | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
+  fi
+  if [ -n "$_cmdline" ]; then
+    echo ""
+    echo "  Процесс (pid ${_pid:-?}):"
+    echo "    $_cmdline"
   fi
   echo ""
 
@@ -725,7 +817,7 @@ check_proxy() {
     printf "  Итог: %bчастично%b  (%s/3) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
   else
     printf "  Итог: %bтуннель не отвечает%b  (0/3)\n" "$red" "$reset"
-    echo "        Попробуйте Fix (пункт 5) или перезапуск сервиса (пункт 6)."
+    echo "        Попробуйте Fix (пункт 4) или перезапуск сервиса (пункт 5)."
   fi
   echo ""
 }
@@ -815,44 +907,39 @@ run_menu() {
 
     printf '%b\n' "${yellow}Выберите действие:${reset}"
     echo ""
-    echo "  [1]  Установить Opera-proxy (официальный)"
-    echo "  [2]  Установить Opera-proxy UPX (сжатый)"
-    echo "  [3]  Обновить Opera-proxy (opkg)"
-    echo "  [4]  Обновление Bin Opera-Proxy из GitHub"
-    echo "  [5]  Fix Opera (+socks5)"
-    echo "  [6]  Остановить / Запустить сервис"
-    echo "  [7]  Проверить прокси"
+    echo "  [1]  Установить Opera-proxy"
+    echo "  [2]  Обновить Opera-proxy (opkg)"
+    echo "  [3]  Обновление Bin Opera-Proxy из GitHub"
+    echo "  [4]  Fix Opera (+socks5)"
+    echo "  [5]  Остановить / Запустить сервис"
+    echo "  [6]  Проверить прокси"
     echo "  [88] Удалить"
     echo "  [0]  Выход"
     echo ""
 
-    choice=$(ask "Выбор [0-7 / 88], Enter = выход: " "0")
+    choice=$(ask "Выбор [0-6 / 88], Enter = выход: " "0")
     case "$choice" in
       1)
-        install_opera_proxy
+        install_opera_menu
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
       2)
-        install_opera_compressed
-        ask "Нажмите Enter для возврата в меню... " ""
-        ;;
-      3)
         upgrade_opera_proxy
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      4)
+      3)
         update_opera_bin
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      5)
+      4)
         fix_opera
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      6)
+      5)
         toggle_service
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      7)
+      6)
         check_proxy
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
