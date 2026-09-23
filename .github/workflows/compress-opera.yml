@@ -37,15 +37,17 @@ jobs:
             echo "op_name="
           } >> "$GITHUB_OUTPUT"
 
-          # Архитектуры: путь_на_зеркале | суффикс_в_имени_ipk
+          # ---------------------------------------------------------------------------
+          # 1) Версия на sw.ext.io (каркас IPK: init, conf, control)
+          # ---------------------------------------------------------------------------
           echo "== Версии на sw.ext.io =="
-          : > /tmp/wanted.txt
           : > /tmp/wanted_src.txt
-          OP_VER=""
+          MIRROR_VER=""
 
-          for pair in "aarch64|aarch64-3.10" "mipsel|mipsel-3.4" "mips|mips-3.4"; do
-            path="${pair%%|*}"
-            suffix="${pair##*|}"
+          for pair in "aarch64|aarch64-3.10|linux-arm64" "mipsel|mipsel-3.4|linux-mipsle" "mips|mips-3.4|linux-mips"; do
+            path=$(echo "$pair" | cut -d'|' -f1)
+            suffix=$(echo "$pair" | cut -d'|' -f2)
+            gh_bin=$(echo "$pair" | cut -d'|' -f3)
             ipk=$(curl -sL "$MIRROR/$path/" \
               | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${suffix}\\.ipk" \
               | sort -V | tail -1 || true)
@@ -53,29 +55,85 @@ jobs:
               echo "  skip mirror $path (пакет не найден)"
               continue
             fi
-            # итоговое имя: opera-proxy_1.29.0-1_aarch64-3.10_compressed.ipk
-            want="${ipk%.ipk}_compressed.ipk"
-            echo "  IPK: $ipk => $want"
-            echo "$want" >> /tmp/wanted.txt
-            echo "${path}|${ipk}|${want}" >> /tmp/wanted_src.txt
             v=$(echo "$ipk" | sed -n 's/^opera-proxy_\([^_]*\)_.*/\1/p')
-            [ -n "$v" ] && OP_VER="$v"
+            [ -n "$v" ] && MIRROR_VER="$v"
+            # path|ipk|suffix|gh_bin
+            echo "${path}|${ipk}|${suffix}|${gh_bin}" >> /tmp/wanted_src.txt
+            echo "  mirror $path: $ipk"
           done
-          sort -u /tmp/wanted.txt -o /tmp/wanted.txt
 
-          if [ -z "$OP_VER" ]; then
+          if [ -z "$MIRROR_VER" ] || [ ! -s /tmp/wanted_src.txt ]; then
             echo "❌ Не удалось определить версию opera-proxy на зеркале"
             exit 1
           fi
+          MIRROR_BASE=$(echo "$MIRROR_VER" | sed 's/-[0-9][0-9]*$//')
+          echo "  Зеркало: $MIRROR_VER (base $MIRROR_BASE)"
+
+          # ---------------------------------------------------------------------------
+          # 2) Официальный релиз Alexey71/opera-proxy
+          # ---------------------------------------------------------------------------
+          echo ""
+          echo "== Официальный релиз (GitHub) =="
+          OFF_JSON=$(curl -sL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" || true)
+          if [ -z "$OFF_JSON" ] || ! echo "$OFF_JSON" | jq -e '.tag_name' >/dev/null 2>&1; then
+            OFF_JSON=$(curl -sL \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" || true)
+          fi
+
+          OFF_TAG=$(echo "$OFF_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
+          OFF_BASE=$(echo "$OFF_TAG" | sed 's/^v//')
+          echo "  Official: ${OFF_TAG:-не найден} (base ${OFF_BASE:-?})"
+
+          USE_OFFICIAL=0
+          if [ -n "$OFF_BASE" ] && [ -n "$MIRROR_BASE" ]; then
+            if [ "$OFF_BASE" = "$MIRROR_BASE" ]; then
+              echo "  Версии совпадают — берём IPK с зеркала as-is + UPX"
+            else
+              _first=$(printf '%s\n%s\n' "$MIRROR_BASE" "$OFF_BASE" | sort -V | head -1)
+              if [ "$_first" = "$MIRROR_BASE" ]; then
+                echo "  Official новее зеркала → подмена bin из $OFF_TAG"
+                USE_OFFICIAL=1
+              else
+                echo "  Зеркало новее/не сравнимо — берём IPK с зеркала + UPX"
+              fi
+            fi
+          else
+            echo "  Official недоступен — берём IPK с зеркала + UPX"
+          fi
+
+          # Итоговая версия пакета
+          if [ "$USE_OFFICIAL" = "1" ]; then
+            # revision -1 как у Entware
+            OP_VER="${OFF_BASE}-1"
+            SRC_NOTE="bin из official ${OFF_TAG}, каркас IPK с sw.ext.io (${MIRROR_VER})"
+          else
+            OP_VER="$MIRROR_VER"
+            SRC_NOTE="IPK с sw.ext.io (${MIRROR_VER}) + UPX"
+          fi
 
           OP_NAME="v${OP_VER} (opera-proxy UPX)"
-          # тег релиза: op-1.29.0-1
           OP_TAG=$(echo "op-${OP_VER}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+
+          # Имена выходных файлов
+          : > /tmp/wanted.txt
+          while IFS='|' read -r path ipk suffix gh_bin; do
+            want="opera-proxy_${OP_VER}_${suffix}_compressed.ipk"
+            echo "$want" >> /tmp/wanted.txt
+            echo "  want: $want"
+          done < /tmp/wanted_src.txt
+          sort -u /tmp/wanted.txt -o /tmp/wanted.txt
 
           echo "op_ver=$OP_VER" >> "$GITHUB_OUTPUT"
           echo "op_tag=$OP_TAG" >> "$GITHUB_OUTPUT"
           echo "op_name=$OP_NAME" >> "$GITHUB_OUTPUT"
 
+          # ---------------------------------------------------------------------------
+          # 3) Уже есть наш релиз?
+          # ---------------------------------------------------------------------------
           echo ""
           echo "== Проверка релиза «${OP_TAG}» =="
           API_JSON=$(curl -sL \
@@ -88,11 +146,11 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           echo "  Релиза нет — собираем"
 
-          # Changelog из upstream Alexey71/opera-proxy
-          # Версия пакета: 1.29.0-1 → тег v1.29.0 (без -N revision)
+          # ---------------------------------------------------------------------------
+          # Changelog
+          # ---------------------------------------------------------------------------
           fetch_official_cl() {
             _ver_full="$1"
             _ver_base=$(echo "$_ver_full" | sed 's/-[0-9][0-9]*$//')
@@ -129,10 +187,15 @@ jobs:
           }
 
           {
-            echo "UPX-сборка **opera-proxy** из [sw.ext.io](${MIRROR})."
+            echo "UPX-сборка **opera-proxy**."
             echo ""
             echo "- Версия пакета: **${OP_VER}**"
             echo "- Тег: \`${OP_TAG}\`"
+            echo "- Источник: ${SRC_NOTE}"
+            if [ "$USE_OFFICIAL" = "1" ]; then
+              echo "- Official: https://github.com/${UPSTREAM_REPO}/releases/tag/${OFF_TAG}"
+            fi
+            echo "- Зеркало IPK: ${MIRROR}"
             echo ""
             echo "### Changelog (upstream)"
             echo ""
@@ -141,14 +204,19 @@ jobs:
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
+          # ---------------------------------------------------------------------------
+          # 4) Сборка
+          # ---------------------------------------------------------------------------
           echo ""
           echo "== Сборка =="
-          while IFS='|' read -r path ipk want; do
-            [ -n "$want" ] || continue
+          while IFS='|' read -r path ipk suffix gh_bin; do
+            [ -n "$ipk" ] || continue
+            want="opera-proxy_${OP_VER}_${suffix}_compressed.ipk"
+            echo ""
+            echo "→ $want (каркас: $ipk)"
 
-            echo "IPK: $ipk"
             wget -q -O "work/$ipk" "$MIRROR/$path/$ipk"
-            [ -s "work/$ipk" ] || { echo "  ❌ скачивание не удалось"; continue; }
+            [ -s "work/$ipk" ] || { echo "  ❌ скачивание IPK не удалось"; continue; }
 
             rm -rf work/repack
             mkdir -p work/repack/control work/repack/data
@@ -158,7 +226,42 @@ jobs:
               tar -xzf control.tar.gz -C control 2>/dev/null || true
               tar -xzf data.tar.gz -C data 2>/dev/null || true
 
-              # Сжимаем бинарники (не shell-скрипты)
+              # Подмена bin из official, если новее
+              if [ "$USE_OFFICIAL" = "1" ]; then
+                BIN_URL="https://github.com/${UPSTREAM_REPO}/releases/download/${OFF_TAG}/opera-proxy.${gh_bin}"
+                BIN_DST=""
+                # типичный путь в IPK
+                if [ -f data/opt/sbin/opera-proxy ]; then
+                  BIN_DST="data/opt/sbin/opera-proxy"
+                else
+                  BIN_DST=$(find data -type f -name 'opera-proxy' 2>/dev/null | head -1)
+                fi
+                if [ -z "$BIN_DST" ]; then
+                  echo "  ⚠ путь к bin в IPK не найден — оставляем оригинал"
+                else
+                  echo "  ↓ $BIN_URL → $BIN_DST"
+                  if ! wget -q -O "$BIN_DST" "$BIN_URL"; then
+                    # fallback proxies
+                    curl -fL --connect-timeout 15 --max-time 120 -o "$BIN_DST" "$BIN_URL" \
+                      || curl -fL --connect-timeout 15 --max-time 120 -o "$BIN_DST" "https://ghfast.top/${BIN_URL}" \
+                      || true
+                  fi
+                  if [ -s "$BIN_DST" ]; then
+                    chmod +x "$BIN_DST"
+                    echo "  ✓ bin заменён ($(du -h "$BIN_DST" | awk '{print $1}'))"
+                  else
+                    echo "  ❌ не удалось скачать official bin — оставляем из IPK"
+                  fi
+                fi
+
+                # Обновить Version в control
+                if [ -f control/control ]; then
+                  sed -i "s/^Version: .*/Version: ${OP_VER}/" control/control
+                  echo "  Version → ${OP_VER}"
+                fi
+              fi
+
+              # UPX всех ELF-бинарников
               find data -type f \( -executable -o -name 'opera-proxy' \) 2>/dev/null | while read -r f; do
                 [ -f "$f" ] || continue
                 head2=$(head -c 2 "$f" 2>/dev/null || true)
@@ -174,7 +277,7 @@ jobs:
                   || true
               done
 
-              # Пересчитать Installed-Size после UPX
+              # Installed-Size после UPX
               NEW_SIZE=$(du -sb data 2>/dev/null | awk '{print $1}')
               if [ -n "$NEW_SIZE" ] && [ "$NEW_SIZE" -gt 0 ] 2>/dev/null; then
                 OLD_SIZE=$(sed -n 's/^Installed-Size: *//p' control/control 2>/dev/null | head -1)
