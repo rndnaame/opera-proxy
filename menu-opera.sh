@@ -6,7 +6,11 @@
 #
 # Запуск:
 #   sh menu-opera.sh
-#   curl -sL <url>/menu-opera.sh | sh
+#   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
+
+# URL для самообновления (пункт 99)
+SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
+SCRIPT_URL_MIRRORS="https://ghfast.top/https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh https://gh-proxy.com/https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh"
 
 # ---------------------------------------------------------------------------
 # UI (цвета как у awg-compressed; NO_COLOR=1 — без ANSI)
@@ -552,76 +556,160 @@ fix_opera() {
   printf '%b\n' "${bold}[4] Fix Opera (+socks5)${reset}"
   echo ""
 
-  if [ -f /opt/fix_opera_tunnel.sh ]; then
-    echo "→ Найден /opt/fix_opera_tunnel.sh — запускаем..."
-    echo ""
-    sh /opt/fix_opera_tunnel.sh
-    return $?
-  fi
-
-  echo "→ Файл fix-скрипта отсутствует. Создаём..."
-  echo ""
-
   if [ ! -f /opt/etc/init.d/S99opera-proxy ]; then
     echo "✗ opera-proxy не установлен!"
     return 1
   fi
 
+  echo "→ Обновляем /opt/fix_opera_tunnel.sh ..."
   cat > /opt/fix_opera_tunnel.sh << 'FIXSCRIPT'
 #!/bin/sh
-TAG="opera-proxy"; LOG="/var/log/opera-tunnel.log"
+# Fix Opera tunnel: IP + Telegram; при провале — замена socks5
+TAG="opera-proxy"
+LOG="/var/log/opera-tunnel.log"
 mkdir -p "$(dirname "$LOG")"
-log(){ ts="$(date "+%Y-%m-%d %H:%M:%S")"; echo "[$ts] $2" | tee -a "$LOG"; logger -p user."$1" -t "$TAG" "$2" 2>/dev/null || true; }
-show_config(){ [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"; }
 
-IP=$(curl --interface t2s0 -m 8 --connect-timeout 5 -s http://api.ipify.org 2>/dev/null)
-if echo "$IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"; then log warn "✓ Туннель работает! IP: $IP"; show_config; exit 0; fi
+log() {
+  ts="$(date "+%Y-%m-%d %H:%M:%S")"
+  echo "[$ts] $2" | tee -a "$LOG"
+  logger -p user."$1" -t "$TAG" "$2" 2>/dev/null || true
+}
 
-log err "✗ Туннель не работает"
+show_config() {
+  [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"
+}
 
-if ! ip link show t2s0 2>/dev/null | grep -q "state UP"; then
-  log warn "Интерфейс t2s0 DOWN!"; echo -n "Включить Proxy0? (y/n): "; read -r a
-  case $a in [Yy]*) ndmc -c interface Proxy0 up && ndmc -c system configuration save; sleep 5;; *) log warn "Отменено"; exit 1;; esac
+# Проверка IP через t2s0 → 0 ок / 1 нет; печатает IP в LAST_IP
+check_ip() {
+  LAST_IP=$(curl --interface t2s0 -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
+  echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
+}
+
+# Проверка Telegram через t2s0 → 0 ок / 1 нет
+check_telegram() {
+  code=$(curl --interface t2s0 -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+    -L https://web.telegram.org 2>/dev/null)
+  case "$code" in
+    200|301|302|303|307|308) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Полная проверка: IP + Telegram
+tunnel_ok() {
+  if ! check_ip; then
+    log err "✗ IP через t2s0: нет"
+    return 1
+  fi
+  log warn "✓ IP: $LAST_IP"
+  if ! check_telegram; then
+    log err "✗ Telegram (web.telegram.org) через t2s0: нет"
+    return 1
+  fi
+  log warn "✓ Telegram: OK"
+  return 0
+}
+
+# ── Быстрый выход, если всё уже работает ──
+if tunnel_ok; then
+  log warn "✓ Туннель работает (IP + Telegram)"
+  show_config
+  exit 0
 fi
 
-/opt/etc/init.d/S99opera-proxy stop 2>/dev/null; killall -9 opera-proxy opera-proxy-monitor 2>/dev/null; sleep 4
+log err "✗ Туннель требует восстановления (IP и/или Telegram)"
 
-TEMP=/tmp/s5.txt; rm -f "$TEMP"
-curl -s -L -m 20 -o "$TEMP" https://databay.com/free-proxy-list/socks5.txt || curl -s -L -m 20 -o "$TEMP" https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt
+# Поднять Proxy0 при необходимости
+if ! ip link show t2s0 2>/dev/null | grep -q "state UP"; then
+  log warn "Интерфейс t2s0 DOWN!"
+  if [ -t 0 ]; then
+    echo -n "Включить Proxy0? (y/n): "
+    read -r a
+    case $a in
+      [Yy]*)
+        ndmc -c "interface Proxy0 up" 2>/dev/null
+        ndmc -c "system configuration save" 2>/dev/null
+        sleep 5
+        ;;
+      *) log warn "Отменено"; exit 1 ;;
+    esac
+  else
+    # cron / non-interactive
+    log warn "Включаем Proxy0 (non-interactive)..."
+    ndmc -c "interface Proxy0 up" 2>/dev/null
+    ndmc -c "system configuration save" 2>/dev/null
+    sleep 5
+  fi
+  if tunnel_ok; then
+    log warn "✓ После включения Proxy0 туннель OK"
+    show_config
+    exit 0
+  fi
+fi
+
+# Остановка перед сменой прокси
+/opt/etc/init.d/S99opera-proxy stop 2>/dev/null
+killall -9 opera-proxy opera-proxy-monitor 2>/dev/null
+sleep 4
+
+# Список socks5
+TEMP=/tmp/s5.txt
+rm -f "$TEMP"
+curl -s -L -m 20 -o "$TEMP" https://databay.com/free-proxy-list/socks5.txt \
+  || curl -s -L -m 20 -o "$TEMP" https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt
 
 PROXY_COUNT=$(grep -cE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+" "$TEMP" 2>/dev/null || echo 0)
-log warn "Проверка скачанного списка прокси ($PROXY_COUNT шт.)"
+log warn "Список прокси: $PROXY_COUNT шт."
 
-COUNT=0; P1=""; P2=""; P3=""
-while IFS= read -r p && [ $COUNT -lt 3 ]; do
+# Отбор живых socks5 (до 5 штук)
+COUNT=0
+P1=""; P2=""; P3=""; P4=""; P5=""
+while IFS= read -r p && [ "$COUNT" -lt 5 ]; do
   p=$(echo "$p" | tr -d "\r" | sed -E "s|^socks5?h?://||;s|[[:space:]]||g")
   echo "$p" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$" || continue
-  if curl -x "socks5h://$p" -m 10 --connect-timeout 7 -s -o /dev/null -w "%{http_code}" http://api.ipify.org 2>/dev/null | grep -q "^200$"; then
-    COUNT=$((COUNT+1)); eval "P$COUNT=\$p"
+  if curl -x "socks5h://$p" -m 10 --connect-timeout 7 -s -o /dev/null -w "%{http_code}" \
+      http://api.ipify.org 2>/dev/null | grep -q "^200$"; then
+    COUNT=$((COUNT + 1))
+    eval "P$COUNT=\$p"
+    log notice "   кандидат #$COUNT: $p"
   fi
 done < "$TEMP"
 
 [ -z "$P1" ] && [ -s "$TEMP" ] && P1=$(head -n1 "$TEMP" | tr -d "\r" | sed -E "s|^socks5?h?://||;s|[[:space:]]||g")
-P2=${P2:-$P1}; P3=${P3:-$P1}
+P2=${P2:-$P1}; P3=${P3:-$P1}; P4=${P4:-$P1}; P5=${P5:-$P1}
 
-start(){ echo "OPTIONS=\"-socks-mode -country EU $1\"" > /opt/etc/opera-proxy.conf; /opt/etc/init.d/S99opera-proxy stop 2>/dev/null; killall -9 opera-proxy 2>/dev/null; sleep 3; /opt/etc/init.d/S99opera-proxy start; }
+start() {
+  echo "OPTIONS=\"-socks-mode -country EU $1\"" > /opt/etc/opera-proxy.conf
+  /opt/etc/init.d/S99opera-proxy stop 2>/dev/null
+  killall -9 opera-proxy 2>/dev/null
+  sleep 3
+  /opt/etc/init.d/S99opera-proxy start
+}
 
 SUCCESS=0
-for p in "$P1" "$P2" "$P3"; do
+for p in "$P1" "$P2" "$P3" "$P4" "$P5"; do
   [ -z "$p" ] && continue
-  log warn "Пробуем $p"; start "-api-proxy socks5://$p"; sleep 10
-  for i in $(seq 1 8); do
-    IP=$(curl --interface t2s0 -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
-    if echo "$IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"; then
-      log warn "✓ УСПЕШНО! Прокси: $p"; log warn "   IP: $IP"; show_config
-      ndmc -c interface Proxy0 ping-check profile default && ndmc -c system configuration save
-      SUCCESS=1; exit 0
+  log warn "Пробуем socks5://$p"
+  start "-api-proxy socks5://$p"
+  sleep 10
+  i=1
+  while [ "$i" -le 8 ]; do
+    if tunnel_ok; then
+      log warn "✓ УСПЕШНО! Прокси: $p  IP: $LAST_IP  Telegram: OK"
+      show_config
+      ndmc -c "interface Proxy0 ping-check profile default" 2>/dev/null
+      ndmc -c "system configuration save" 2>/dev/null
+      SUCCESS=1
+      exit 0
     fi
     sleep 2
+    i=$((i + 1))
   done
+  log warn "   $p — не подошёл (IP и/или Telegram)"
 done
 
-[ $SUCCESS -eq 0 ] && log err "Не удалось восстановить туннель"
+[ "$SUCCESS" -eq 0 ] && log err "Не удалось восстановить туннель (IP + Telegram)"
+exit 1
 FIXSCRIPT
 
   chmod +x /opt/fix_opera_tunnel.sh
@@ -641,7 +729,7 @@ FIXSCRIPT
 CRON
   chmod +x /opt/etc/cron.hourly/fix_opera_tunnel
 
-  echo "✅ Скрипт создан: /opt/fix_opera_tunnel.sh"
+  echo "✅ Скрипт обновлён: /opt/fix_opera_tunnel.sh"
   echo "Cron настроен (каждый час)"
   echo ""
   echo "Запускаем скрипт..."
