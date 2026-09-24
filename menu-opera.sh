@@ -579,13 +579,12 @@ show_config() {
   [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"
 }
 
-# Проверка IP через t2s0 → 0 ок / 1 нет; печатает IP в LAST_IP
+# Проверка IP через t2s0 (Keenetic Proxy0)
 check_ip() {
   LAST_IP=$(curl --interface t2s0 -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
   echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
 }
 
-# Проверка Telegram через t2s0 → 0 ок / 1 нет
 check_telegram() {
   code=$(curl --interface t2s0 -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
     -L https://web.telegram.org 2>/dev/null)
@@ -595,7 +594,23 @@ check_telegram() {
   esac
 }
 
-# Полная проверка: IP + Telegram
+# Проверка напрямую через локальный SOCKS opera-proxy (без Proxy0)
+LOCAL_SOCKS="127.0.0.1:18080"
+check_ip_local() {
+  LAST_IP=$(curl --socks5-hostname "$LOCAL_SOCKS" -m 10 --connect-timeout 6 -s https://api.ipify.org 2>/dev/null)
+  echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
+}
+
+check_telegram_local() {
+  code=$(curl --socks5-hostname "$LOCAL_SOCKS" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+    -L https://web.telegram.org 2>/dev/null)
+  case "$code" in
+    200|301|302|303|307|308) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Полная проверка туннеля Keenetic (t2s0)
 tunnel_ok() {
   if ! check_ip; then
     log err "✗ IP через t2s0: нет"
@@ -603,7 +618,7 @@ tunnel_ok() {
   fi
   log warn "✓ IP: $LAST_IP"
   if ! check_telegram; then
-    log err "✗ Telegram (web.telegram.org) через t2s0: нет"
+    log err "✗ Telegram через t2s0: нет"
     return 1
   fi
   log warn "✓ Telegram: OK"
@@ -730,64 +745,76 @@ if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
   exit 1
 fi
 
-# Проверка socks5 для -api-proxy: нужен HTTPS CONNECT (как к API Opera), не голый HTTP
+# Быстрая проверка socks5 (короткие таймауты)
 socks5_ok() {
   _p="$1"
-  # 1) HTTPS через socks5h (CONNECT) — ближе к реальному api-proxy
-  _code=$(curl -x "socks5h://$_p" -m 6 --connect-timeout 3 -s -o /dev/null -w "%{http_code}" \
+  _code=$(curl -x "socks5h://$_p" -m 4 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
     https://api.ipify.org 2>/dev/null)
   [ "$_code" = "200" ] && return 0
-  # 2) запасной HTTP (хуже, но лучше чем ничего)
-  _code=$(curl -x "socks5h://$_p" -m 4 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
+  _code=$(curl -x "socks5h://$_p" -m 3 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
     http://api.ipify.org 2>/dev/null)
   [ "$_code" = "200" ] && return 0
   return 1
 }
 
-# Отбор: HTTPS-проверка, без дублей, второй проход если пусто
-NEED=5
-MAX_TEST=80
+# Параллельный отбор: батчи по PARALLEL, до NEED живых, макс MAX_TEST проверок
+NEED=3
+MAX_TEST=40
+PARALLEL=5
 COUNT=0
 TESTED=0
 CANDS=""
+OKFILE=/tmp/s5.ok
+rm -f "$OKFILE"
+: > "$OKFILE"
 
-pick_candidates() {
-  _max="$1"
-  while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$_max" ]; do
-    [ -z "$p" ] && continue
-    # уже в списке?
-    case " $CANDS " in *" $p "*) continue ;; esac
-    TESTED=$((TESTED + 1))
-    if socks5_ok "$p"; then
-      COUNT=$((COUNT + 1))
-      CANDS="$CANDS $p"
-      log notice "   кандидат #$COUNT: $p  (проверено $TESTED, HTTPS/HTTP ok)"
-    fi
-  done < "$POOL"
+log warn "Отбор socks5 (параллельно ×${PARALLEL}, макс ${MAX_TEST})..."
+
+# Берём первые MAX_TEST из пула в батчи
+head -n "$MAX_TEST" "$POOL" > /tmp/s5.slice
+BATCH=""
+BATCH_N=0
+flush_batch() {
+  [ -z "$BATCH" ] && return 0
+  for _bp in $BATCH; do
+    (
+      if socks5_ok "$_bp"; then
+        echo "$_bp" >> "$OKFILE"
+      fi
+    ) &
+  done
+  wait
+  BATCH=""
+  BATCH_N=0
 }
 
-log warn "Отбор socks5 для API (HTTPS CONNECT, макс ${MAX_TEST})..."
-pick_candidates "$MAX_TEST"
-
-# Второй проход: ещё 80, если мало кандидатов
-if [ "$COUNT" -lt 2 ]; then
-  log warn "Мало кандидатов ($COUNT) — второй проход (+80)..."
-  # сдвиг «указателя»: пропускаем уже просмотренные через tail
-  tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
-  if [ -s /tmp/s5.pool2 ]; then
-    POOL=/tmp/s5.pool2
-    pick_candidates $((TESTED + 80))
+while IFS= read -r p; do
+  [ -z "$p" ] && continue
+  TESTED=$((TESTED + 1))
+  BATCH="$BATCH $p"
+  BATCH_N=$((BATCH_N + 1))
+  if [ "$BATCH_N" -ge "$PARALLEL" ]; then
+    flush_batch
+    # сколько уже нашли?
+    COUNT=$(grep -cE '^[0-9]' "$OKFILE" 2>/dev/null || echo 0)
+    [ "$COUNT" -ge "$NEED" ] 2>/dev/null && break
   fi
-fi
+done < /tmp/s5.slice
+flush_batch
+COUNT=$(grep -cE '^[0-9]' "$OKFILE" 2>/dev/null || echo 0)
 
-log warn "Отбор: найдено $COUNT живых (уникальных), проверено $TESTED"
+# Уникальные кандидаты
+CANDS=$(sort -u "$OKFILE" 2>/dev/null | head -n "$NEED" | tr '\n' ' ')
+COUNT=$(echo "$CANDS" | wc -w | tr -d ' ')
+log warn "Отбор: найдено ${COUNT:-0} за ${TESTED} проверок (×${PARALLEL})"
 
-# Только уникальные непустые — без P2=P1 дублей
-if [ -z "$CANDS" ]; then
-  log err "Нет пригодных socks5 (HTTPS) — список мёртв или недоступен"
-  # Proxy0 остаётся down
+if [ -z "$CANDS" ] || [ "${COUNT:-0}" -lt 1 ]; then
+  log err "Нет пригодных socks5 — список мёртв или недоступен"
   exit 1
 fi
+for _c in $CANDS; do
+  log notice "   кандидат: $_c"
+done
 
 start() {
   echo "OPTIONS=\"-socks-mode -country EU $1\"" > /opt/etc/opera-proxy.conf
@@ -797,36 +824,38 @@ start() {
   /opt/etc/init.d/S99opera-proxy start
 }
 
+# Proxy0 остаётся down; проверка только через локальный SOCKS :18080
 SUCCESS=0
-SEEN=""
 for p in $CANDS; do
   [ -z "$p" ] && continue
-  case " $SEEN " in *" $p "*) continue ;; esac
-  SEEN="$SEEN $p"
-
   log warn "Пробуем socks5://$p"
   start "-api-proxy socks5://$p"
-  sleep 8
-  proxy0_up
+  sleep 6
   i=1
-  while [ "$i" -le 10 ]; do
-    if tunnel_ok; then
-      log warn "✓ УСПЕШНО! Прокси: $p  IP: $LAST_IP  Telegram: OK"
-      show_config
-      ndmc -c "interface Proxy0 ping-check profile default" 2>/dev/null
-      ndmc -c "system configuration save" 2>/dev/null
-      SUCCESS=1
-      exit 0
+  while [ "$i" -le 6 ]; do
+    if check_ip_local; then
+      log warn "✓ IP (socks 18080): $LAST_IP"
+      if check_telegram_local; then
+        log warn "✓ Telegram (socks 18080): OK"
+        log warn "✓ УСПЕШНО! Прокси: $p  IP: $LAST_IP"
+        show_config
+        # Proxy0 up только после удачной проверки
+        proxy0_up
+        ndmc -c "interface Proxy0 ping-check profile default" 2>/dev/null
+        ndmc -c "system configuration save" 2>/dev/null
+        SUCCESS=1
+        exit 0
+      fi
+      log notice "   IP ок, Telegram нет — ждём..."
     fi
     sleep 2
     i=$((i + 1))
   done
-  log warn "   $p — не подошёл как api-proxy (IP и/или Telegram)"
-  proxy0_down
+  log warn "   $p — не подошёл"
 done
 
-[ "$SUCCESS" -eq 0 ] && log err "Не удалось восстановить туннель (IP + Telegram)"
-log warn "Proxy0 оставлен down — запустите Fix снова или поднимите интерфейс вручную"
+[ "$SUCCESS" -eq 0 ] && log err "Не удалось восстановить туннель"
+log warn "Proxy0 остаётся down — запустите Fix снова или поднимите интерфейс вручную"
 exit 1
 FIXSCRIPT
 
