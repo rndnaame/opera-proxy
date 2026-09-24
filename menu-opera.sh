@@ -148,42 +148,135 @@ show_status() {
 }
 
 # ---------------------------------------------------------------------------
-# Общие: Proxy0 + проверка туннеля
+# Conf (SNI + DoH + COUNTRY) + умный ProxyX
 # ---------------------------------------------------------------------------
-proxy0_exists() {
-  # t2s0 или интерфейс Proxy0 уже есть — повторно создавать не нужно
-  if ip link show t2s0 >/dev/null 2>&1; then
+OP_CONF_FILE="/opt/etc/opera-proxy.conf"
+IFACE_DESC="OperaProxy"
+BIND_PORT_DEFAULT="18080"
+
+# Записать conf (SNI/DoH/COUNTRY). Не затирает существующий без force.
+write_opera_conf() {
+  _force="${1:-}"
+  if [ -f "$OP_CONF_FILE" ] && [ "$_force" != "force" ]; then
+    # уже есть — только убедимся, что OPTIONS собирается
+    if ! grep -q 'fake-SNI\|BOOTSTRAP_DNS\|COUNTRY=' "$OP_CONF_FILE" 2>/dev/null; then
+      echo "   ⚠ старый conf без SNI/DoH — обновляем (force)"
+      _force="force"
+    else
+      echo "   conf уже есть: $OP_CONF_FILE"
+      return 0
+    fi
+  fi
+  _api_extra=""
+  if [ -f "$OP_CONF_FILE" ]; then
+    _api_extra=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1 || true)
+  fi
+  cat > "$OP_CONF_FILE" << 'CONFEOF'
+# Конфигурация opera-proxy (Keenetic / Entware)
+# После правок: /opt/etc/init.d/S99opera-proxy restart
+
+# Регион: EU | AM | AS
+COUNTRY="EU"
+
+# 127.0.0.1 — только роутер; 0.0.0.0 — вся LAN
+BIND_ADDR="127.0.0.1"
+BIND_PORT="18080"
+
+# Обход ТСПУ/DPI
+OBFUSCATE="yes"
+FAKE_SNI="2gis.com"
+
+# DoH для поиска серверов Opera
+BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+
+# random | fastest
+SERVER_SELECT="random"
+VERBOSITY="30"
+
+# Сборка OPTIONS (раскрывается при source conf)
+OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
+if [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ]; then
+  OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
+fi
+CONFEOF
+  if [ -n "$_api_extra" ]; then
+    {
+      echo ""
+      echo "# api-proxy (добавлено Fix)"
+      echo "OPTIONS=\"\$OPTIONS $_api_extra\""
+    } >> "$OP_CONF_FILE"
+  fi
+  echo "   ✓ conf: $OP_CONF_FILE (SNI/DoH/COUNTRY)"
+}
+
+# Найти ProxyX с description Opera/OperaProxy или первый свободный
+find_opera_iface() {
+  IFACE=""
+  if ! command -v ndmc >/dev/null 2>&1; then
+    IFACE="Proxy0"
     return 0
   fi
-  if ifconfig t2s0 >/dev/null 2>&1; then
-    return 0
+  _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+  if [ -n "$_rc" ]; then
+    IFACE=$(printf '%s\n' "$_rc" | awk '
+      /^interface Proxy[0-9]+/ { cur=$2 }
+      /description.*(OperaProxy|Opera)/ { print cur; exit }
+    ')
   fi
-  if command -v ndmc >/dev/null 2>&1; then
-    ndmc -c "show interface Proxy0" 2>/dev/null | grep -qi 'Proxy0\|interface' && return 0
+  if [ -z "$IFACE" ] && [ -n "$_rc" ]; then
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+      if ! printf '%s\n' "$_rc" | grep -q "^interface Proxy$i"; then
+        IFACE="Proxy$i"
+        break
+      fi
+    done
   fi
-  return 1
+  [ -z "$IFACE" ] && IFACE="Proxy0"
+}
+
+opera_iface_exists() {
+  find_opera_iface
+  # уже есть «наш» iface с description?
+  _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+  printf '%s\n' "$_rc" | awk -v want="$IFACE" '
+    /^interface Proxy[0-9]+/ { cur=$2 }
+    cur==want && /description.*(OperaProxy|Opera)/ { found=1 }
+    END { exit found?0:1 }
+  ' 2>/dev/null
 }
 
 configure_proxy0() {
   echo ""
-  if proxy0_exists; then
-    echo "→ Proxy0 / t2s0 уже есть — настройку интерфейса пропускаем"
+  find_opera_iface
+  _bind="${BIND_PORT_DEFAULT}"
+  if [ -f "$OP_CONF_FILE" ]; then
+    # shellcheck: extract BIND_PORT
+    _bp=$(sed -n 's/^BIND_PORT="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
+    [ -n "$_bp" ] && _bind="$_bp"
+  fi
+
+  if opera_iface_exists; then
+    echo "→ Интерфейс $IFACE (Opera) уже есть — настройку пропускаем"
     return 0
   fi
-  echo "→ Настройка интерфейса Proxy0 (t2s0) через ndmc ..."
+
+  echo "→ Настройка интерфейса $IFACE через ndmc (upstream 127.0.0.1:${_bind}) ..."
   if command -v ndmc >/dev/null 2>&1; then
-    ndmc -c "interface Proxy0" 2>/dev/null || true
-    ndmc -c "interface Proxy0 proxy protocol socks5" 2>/dev/null || true
-    ndmc -c "interface Proxy0 proxy socks5" 2>/dev/null || true
-    ndmc -c "no interface Proxy0 proxy socks5-udp" 2>/dev/null || true
-    ndmc -c "interface Proxy0 proxy upstream 127.0.0.1 18080" 2>/dev/null || true
-    ndmc -c "interface Proxy0 ip global auto" 2>/dev/null || true
-    ndmc -c "interface Proxy0 description OperaProxy" 2>/dev/null || true
-    ndmc -c "interface Proxy0 up" 2>/dev/null || true
+    ndmc -c "interface $IFACE" 2>/dev/null || true
+    ndmc -c "interface $IFACE proxy protocol socks5" 2>/dev/null || true
+    ndmc -c "interface $IFACE proxy socks5" 2>/dev/null || true
+    ndmc -c "no interface $IFACE proxy socks5-udp" 2>/dev/null || true
+    ndmc -c "no interface $IFACE authentication" 2>/dev/null || true
+    ndmc -c "no interface $IFACE authentication identity" 2>/dev/null || true
+    ndmc -c "no interface $IFACE authentication password" 2>/dev/null || true
+    ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_bind}" 2>/dev/null || true
+    ndmc -c "interface $IFACE ip global auto" 2>/dev/null || true
+    ndmc -c "interface $IFACE description $IFACE_DESC" 2>/dev/null || true
+    ndmc -c "interface $IFACE up" 2>/dev/null || true
     ndmc -c "system configuration save" 2>/dev/null || true
-    echo "   ✓ Команды ndmc выполнены (socks5-udp off)"
+    echo "   ✓ $IFACE настроен (description=$IFACE_DESC, socks5-udp off)"
   else
-    echo "   ⚠ ndmc не найден — настройте Proxy0 вручную"
+    echo "   ⚠ ndmc не найден — настройте Proxy вручную"
   fi
 }
 
@@ -264,6 +357,10 @@ do_install_official() {
   fi
 
   echo ""
+  echo "→ Конфиг opera-proxy (SNI/DoH/COUNTRY) ..."
+  write_opera_conf
+
+  echo ""
   echo "→ Запуск сервиса ..."
   /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
     || /opt/etc/init.d/S99opera-proxy start 2>/dev/null || true
@@ -335,6 +432,10 @@ do_install_upx() {
     fi
   fi
   rm -f "$TMP_IPK"
+
+  echo ""
+  echo "→ Конфиг opera-proxy (SNI/DoH/COUNTRY) ..."
+  write_opera_conf
 
   echo ""
   echo "→ Запуск сервиса ..."
@@ -635,17 +736,27 @@ fi
 
 log err "✗ Туннель требует восстановления (IP и/или Telegram)"
 
+# IFACE по description Opera/OperaProxy
+IFACE="Proxy0"
+_rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+_found=$(printf '%s\n' "$_rc" | awk '
+  /^interface Proxy[0-9]+/ { cur=$2 }
+  /description.*(OperaProxy|Opera)/ { print cur; exit }
+')
+[ -n "$_found" ] && IFACE="$_found"
+log notice "Интерфейс: $IFACE"
+
 proxy0_down() {
-  log warn "Proxy0 → down (тишина в журнале на время подбора)"
-  ndmc -c "interface Proxy0 down" 2>/dev/null || true
+  log warn "$IFACE → down (тишина в журнале на время подбора)"
+  ndmc -c "interface $IFACE down" 2>/dev/null || true
   /opt/etc/init.d/S99opera-proxy stop 2>/dev/null || true
   killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
   sleep 2
 }
 
 proxy0_up() {
-  log warn "Proxy0 → up"
-  ndmc -c "interface Proxy0 up" 2>/dev/null || true
+  log warn "$IFACE → up"
+  ndmc -c "interface $IFACE up" 2>/dev/null || true
   ndmc -c "system configuration save" 2>/dev/null || true
   sleep 3
 }
@@ -810,15 +921,45 @@ for _c in $CANDS; do
   log notice "   → $_c"
 done
 
+# Собрать OPTIONS из conf + -api-proxy (не затирать SNI/DoH)
 start() {
-  echo "OPTIONS=\"-socks-mode -country EU $1\"" > /opt/etc/opera-proxy.conf
+  _extra="$1"
+  CONF=/opt/etc/opera-proxy.conf
+  if [ -f "$CONF" ] && grep -q 'COUNTRY=\|fake-SNI\|BOOTSTRAP_DNS' "$CONF" 2>/dev/null; then
+    # убрать старый -api-proxy из conf, пересобрать
+    COUNTRY="EU"; BIND_ADDR="127.0.0.1"; BIND_PORT="18080"
+    OBFUSCATE="yes"; FAKE_SNI="2gis.com"
+    BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+    SERVER_SELECT="random"; VERBOSITY="30"
+    # shellcheck: source conf vars
+    # извлекаем значения без выполнения if/OPTIONS
+    eval "$(grep -E '^(COUNTRY|BIND_ADDR|BIND_PORT|OBFUSCATE|FAKE_SNI|BOOTSTRAP_DNS|SERVER_SELECT|VERBOSITY)=' "$CONF" 2>/dev/null)"
+    OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
+    [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ] && OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
+    [ -n "$_extra" ] && OPTIONS="$OPTIONS $_extra"
+    # сохранить conf с актуальным OPTIONS
+    {
+      echo "# auto by fix_opera_tunnel"
+      echo "COUNTRY=\"$COUNTRY\""
+      echo "BIND_ADDR=\"$BIND_ADDR\""
+      echo "BIND_PORT=\"$BIND_PORT\""
+      echo "OBFUSCATE=\"$OBFUSCATE\""
+      echo "FAKE_SNI=\"$FAKE_SNI\""
+      echo "BOOTSTRAP_DNS=\"$BOOTSTRAP_DNS\""
+      echo "SERVER_SELECT=\"$SERVER_SELECT\""
+      echo "VERBOSITY=\"$VERBOSITY\""
+      echo "OPTIONS=\"$OPTIONS\""
+    } > "$CONF"
+  else
+    echo "OPTIONS=\"-socks-mode -country EU -bind-address 127.0.0.1:18080 $_extra\"" > "$CONF"
+  fi
   /opt/etc/init.d/S99opera-proxy stop 2>/dev/null
   killall -9 opera-proxy 2>/dev/null
   sleep 2
   /opt/etc/init.d/S99opera-proxy start
 }
 
-# Proxy0 остаётся down; проверка только через локальный SOCKS :18080
+# IFACE остаётся down; проверка через local SOCKS :18080
 SUCCESS=0
 for p in $CANDS; do
   [ -z "$p" ] && continue
@@ -833,9 +974,8 @@ for p in $CANDS; do
         log warn "✓ Telegram (socks 18080): OK"
         log warn "✓ УСПЕШНО! Прокси: $p  IP: $LAST_IP"
         show_config
-        # Proxy0 up только после удачной проверки
         proxy0_up
-        ndmc -c "interface Proxy0 ping-check profile default" 2>/dev/null
+        ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null
         ndmc -c "system configuration save" 2>/dev/null
         SUCCESS=1
         exit 0
@@ -849,7 +989,7 @@ for p in $CANDS; do
 done
 
 [ "$SUCCESS" -eq 0 ] && log err "Не удалось восстановить туннель"
-log warn "Proxy0 остаётся down — запустите Fix снова или поднимите интерфейс вручную"
+log warn "$IFACE остаётся down — Fix снова или поднимите интерфейс вручную"
 exit 1
 FIXSCRIPT
 
@@ -1071,12 +1211,22 @@ remove_opera_proxy() {
     fi
 
     echo ""
-    echo "→ Удаление интерфейса Proxy0 ..."
+    echo "→ Удаление интерфейса Opera (по description) ..."
     if command -v ndmc >/dev/null 2>&1; then
-      ndmc -c "no interface Proxy0" 2>/dev/null && echo "   ✓ no interface Proxy0" || echo "   ⚠ Proxy0 не найден или уже удалён"
+      _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+      _del=$(printf '%s\n' "$_rc" | awk '
+        /^interface Proxy[0-9]+/ { cur=$2 }
+        /description.*(OperaProxy|Opera)/ { print cur; exit }
+      ')
+      if [ -n "$_del" ]; then
+        ndmc -c "no interface $_del" 2>/dev/null && echo "   ✓ no interface $_del" || echo "   ⚠ не удалось удалить $_del"
+      else
+        # fallback Proxy0
+        ndmc -c "no interface Proxy0" 2>/dev/null && echo "   ✓ no interface Proxy0 (fallback)" || echo "   ⚠ интерфейс Opera не найден"
+      fi
       ndmc -c "system configuration save" 2>/dev/null && echo "   ✓ Конфигурация сохранена" || echo "   ⚠ Не удалось сохранить конфигурацию"
     else
-      echo "   ⚠ ndmc не найден — удалите Proxy0 вручную"
+      echo "   ⚠ ndmc не найден — удалите Proxy вручную"
     fi
 
     echo ""
