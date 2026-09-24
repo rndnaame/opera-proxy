@@ -619,7 +619,6 @@ fi
 
 log err "✗ Туннель требует восстановления (IP и/или Telegram)"
 
-# Proxy0 DOWN на время подбора — иначе в журнале сыпется socks5 session connect
 proxy0_down() {
   log warn "Proxy0 → down (тишина в журнале на время подбора)"
   ndmc -c "interface Proxy0 down" 2>/dev/null || true
@@ -635,54 +634,99 @@ proxy0_up() {
   sleep 3
 }
 
+# Порядок: down → списки → отбор → up → тест Opera
 proxy0_down
 
-# Источники: мало + недавно проверенные (не 3000 мёртвых)
 TEMP=/tmp/s5.raw
 POOL=/tmp/s5.pool
+CACHE="/opt/etc/opera-s5.cache"
 rm -f "$TEMP" "$POOL"
 : > "$TEMP"
+
+# Скачать URL; для GitHub — зеркала ghfast / gh-proxy
+curl_get() {
+  _u="$1"
+  _out="$2"
+  rm -f "$_out"
+  if curl -sL -m 12 --connect-timeout 6 -o "$_out" "$_u" 2>/dev/null && [ -s "$_out" ]; then
+    return 0
+  fi
+  case "$_u" in
+    https://raw.githubusercontent.com/*)
+      for _px in \
+        "https://ghfast.top/$_u" \
+        "https://gh-proxy.com/$_u" \
+        "https://mirror.ghproxy.com/$_u"
+      do
+        rm -f "$_out"
+        if curl -sL -m 15 --connect-timeout 8 -o "$_out" "$_px" 2>/dev/null && [ -s "$_out" ]; then
+          return 0
+        fi
+      done
+      ;;
+  esac
+  rm -f "$_out"
+  return 1
+}
 
 fetch_list() {
   _url="$1"
   _label="$2"
   _tmp="/tmp/s5.src"
-  rm -f "$_tmp"
-  if curl -sL -m 15 --connect-timeout 8 -o "$_tmp" "$_url" 2>/dev/null && [ -s "$_tmp" ]; then
+  if curl_get "$_url" "$_tmp"; then
     _n=$(grep -cE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$_tmp" 2>/dev/null || echo 0)
-    log notice "   + $_label: $_n"
-    cat "$_tmp" >> "$TEMP"
-    return 0
+    if [ "$_n" -gt 0 ] 2>/dev/null; then
+      log notice "   + $_label: $_n"
+      cat "$_tmp" >> "$TEMP"
+      return 0
+    fi
   fi
   log notice "   − $_label: недоступен"
   return 1
 }
 
-log warn "Загрузка качественных списков socks5..."
-# monosans — hourly re-check, sorted by speed (~200)
-fetch_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" "monosans"
-# proxmint — re-validated every 30 min (~400)
-fetch_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" "proxmint"
-# ProxyScrape — только timeout≤3s
-fetch_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" "proxyscrape≤3s"
-# jetkai online (~400)
-fetch_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" "jetkai"
-# relayglass — check every 5 min (~100)
-fetch_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" "relayglass"
+log warn "Загрузка списков socks5..."
+GOT=0
+fetch_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" "monosans" && GOT=1
+fetch_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" "proxmint" && GOT=1
+fetch_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" "proxyscrape≤3s" && GOT=1
+fetch_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" "jetkai" && GOT=1
+fetch_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" "relayglass" && GOT=1
+# запасной крупный список (если качественные недоступны)
+if [ "$GOT" = "0" ]; then
+  fetch_list "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt" "TheSpeedX" && GOT=1
+  fetch_list "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt" "hookzof" && GOT=1
+fi
 
-# Нормализация, unique, перемешивание
+# Нормализация
 sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g; s/#.*//' "$TEMP" 2>/dev/null \
   | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' \
-  | sort -u \
-  | awk 'BEGIN{srand()} {print rand() "\t" $0}' \
+  | sort -u > /tmp/s5.norm
+
+_norm_n=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
+if [ -n "$_norm_n" ] && [ "$_norm_n" -ge 5 ]; then
+  # обновить кэш
+  mkdir -p "$(dirname "$CACHE")" 2>/dev/null || true
+  cp /tmp/s5.norm "$CACHE" 2>/dev/null || true
+  log notice "   кэш обновлён: $CACHE ($_norm_n)"
+else
+  # fallback на кэш
+  if [ -s "$CACHE" ]; then
+    log warn "Источники недоступны — берём кэш $CACHE"
+    cp "$CACHE" /tmp/s5.norm
+    _norm_n=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
+  fi
+fi
+
+awk 'BEGIN{srand()} {print rand() "\t" $0}' /tmp/s5.norm 2>/dev/null \
   | sort -n \
   | cut -f2- > "$POOL"
 
 PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
 log warn "Пул после unique: ${PROXY_COUNT:-0} шт."
 
-if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 5 ]; then
-  log err "Слишком мало прокси в пуле — источники недоступны?"
+if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
+  log err "Нет списка socks5 (сеть/GitHub недоступны, кэш пуст)"
   exit 1
 fi
 
