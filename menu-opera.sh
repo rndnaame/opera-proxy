@@ -637,52 +637,111 @@ proxy0_up() {
 
 proxy0_down
 
-# Список socks5
-TEMP=/tmp/s5.txt
+# Источники: мало + недавно проверенные (не 3000 мёртвых)
+TEMP=/tmp/s5.raw
 POOL=/tmp/s5.pool
 rm -f "$TEMP" "$POOL"
-curl -s -L -m 20 -o "$TEMP" https://databay.com/free-proxy-list/socks5.txt \
-  || curl -s -L -m 20 -o "$TEMP" https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt
+: > "$TEMP"
 
-# Нормализация + перемешивание (мёртвые в начале списка иначе едят минуты)
-sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g' "$TEMP" 2>/dev/null \
-  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' \
+fetch_list() {
+  _url="$1"
+  _label="$2"
+  _tmp="/tmp/s5.src"
+  rm -f "$_tmp"
+  if curl -sL -m 15 --connect-timeout 8 -o "$_tmp" "$_url" 2>/dev/null && [ -s "$_tmp" ]; then
+    _n=$(grep -cE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$_tmp" 2>/dev/null || echo 0)
+    log notice "   + $_label: $_n"
+    cat "$_tmp" >> "$TEMP"
+    return 0
+  fi
+  log notice "   − $_label: недоступен"
+  return 1
+}
+
+log warn "Загрузка качественных списков socks5..."
+# monosans — hourly re-check, sorted by speed (~200)
+fetch_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" "monosans"
+# proxmint — re-validated every 30 min (~400)
+fetch_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" "proxmint"
+# ProxyScrape — только timeout≤3s
+fetch_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" "proxyscrape≤3s"
+# jetkai online (~400)
+fetch_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" "jetkai"
+# relayglass — check every 5 min (~100)
+fetch_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" "relayglass"
+
+# Нормализация, unique, перемешивание
+sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g; s/#.*//' "$TEMP" 2>/dev/null \
+  | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' \
+  | sort -u \
   | awk 'BEGIN{srand()} {print rand() "\t" $0}' \
   | sort -n \
-  | cut -f2- > "$POOL" 2>/dev/null || cp "$TEMP" "$POOL"
+  | cut -f2- > "$POOL"
 
 PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
-log warn "Список прокси: ${PROXY_COUNT:-0} шт. (перемешан)"
+log warn "Пул после unique: ${PROXY_COUNT:-0} шт."
 
-# Быстрый отбор: короткие таймауты, не больше MAX_TEST проверок, до NEED живых
+if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 5 ]; then
+  log err "Слишком мало прокси в пуле — источники недоступны?"
+  exit 1
+fi
+
+# Проверка socks5 для -api-proxy: нужен HTTPS CONNECT (как к API Opera), не голый HTTP
+socks5_ok() {
+  _p="$1"
+  # 1) HTTPS через socks5h (CONNECT) — ближе к реальному api-proxy
+  _code=$(curl -x "socks5h://$_p" -m 6 --connect-timeout 3 -s -o /dev/null -w "%{http_code}" \
+    https://api.ipify.org 2>/dev/null)
+  [ "$_code" = "200" ] && return 0
+  # 2) запасной HTTP (хуже, но лучше чем ничего)
+  _code=$(curl -x "socks5h://$_p" -m 4 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
+    http://api.ipify.org 2>/dev/null)
+  [ "$_code" = "200" ] && return 0
+  return 1
+}
+
+# Отбор: HTTPS-проверка, без дублей, второй проход если пусто
 NEED=5
-MAX_TEST=60
-CT=2
-MT=4
+MAX_TEST=80
 COUNT=0
 TESTED=0
-P1=""; P2=""; P3=""; P4=""; P5=""
+CANDS=""
 
-log warn "Быстрый отбор (таймаут ${CT}с, макс ${MAX_TEST} проверок)..."
-while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$MAX_TEST" ]; do
-  [ -z "$p" ] && continue
-  TESTED=$((TESTED + 1))
-  if curl -x "socks5h://$p" -m "$MT" --connect-timeout "$CT" -s -o /dev/null -w "%{http_code}" \
-      http://api.ipify.org 2>/dev/null | grep -q "^200$"; then
-    COUNT=$((COUNT + 1))
-    eval "P$COUNT=\$p"
-    log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
+pick_candidates() {
+  _max="$1"
+  while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$_max" ]; do
+    [ -z "$p" ] && continue
+    # уже в списке?
+    case " $CANDS " in *" $p "*) continue ;; esac
+    TESTED=$((TESTED + 1))
+    if socks5_ok "$p"; then
+      COUNT=$((COUNT + 1))
+      CANDS="$CANDS $p"
+      log notice "   кандидат #$COUNT: $p  (проверено $TESTED, HTTPS/HTTP ok)"
+    fi
+  done < "$POOL"
+}
+
+log warn "Отбор socks5 для API (HTTPS CONNECT, макс ${MAX_TEST})..."
+pick_candidates "$MAX_TEST"
+
+# Второй проход: ещё 80, если мало кандидатов
+if [ "$COUNT" -lt 2 ]; then
+  log warn "Мало кандидатов ($COUNT) — второй проход (+80)..."
+  # сдвиг «указателя»: пропускаем уже просмотренные через tail
+  tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
+  if [ -s /tmp/s5.pool2 ]; then
+    POOL=/tmp/s5.pool2
+    pick_candidates $((TESTED + 80))
   fi
-done < "$POOL"
+fi
 
-log warn "Отбор: найдено $COUNT / нужно $NEED (проверено $TESTED за ~$((TESTED * CT))с макс)"
+log warn "Отбор: найдено $COUNT живых (уникальных), проверено $TESTED"
 
-[ -z "$P1" ] && [ -s "$POOL" ] && P1=$(head -n1 "$POOL")
-P2=${P2:-$P1}; P3=${P3:-$P1}; P4=${P4:-$P1}; P5=${P5:-$P1}
-
-if [ -z "$P1" ]; then
-  log err "Нет ни одного кандидата socks5"
-  proxy0_up
+# Только уникальные непустые — без P2=P1 дублей
+if [ -z "$CANDS" ]; then
+  log err "Нет пригодных socks5 (HTTPS) — список мёртв или недоступен"
+  # Proxy0 остаётся down
   exit 1
 fi
 
@@ -695,14 +754,18 @@ start() {
 }
 
 SUCCESS=0
-for p in "$P1" "$P2" "$P3" "$P4" "$P5"; do
+SEEN=""
+for p in $CANDS; do
   [ -z "$p" ] && continue
+  case " $SEEN " in *" $p "*) continue ;; esac
+  SEEN="$SEEN $p"
+
   log warn "Пробуем socks5://$p"
   start "-api-proxy socks5://$p"
-  sleep 6
+  sleep 8
   proxy0_up
   i=1
-  while [ "$i" -le 8 ]; do
+  while [ "$i" -le 10 ]; do
     if tunnel_ok; then
       log warn "✓ УСПЕШНО! Прокси: $p  IP: $LAST_IP  Telegram: OK"
       show_config
@@ -714,13 +777,11 @@ for p in "$P1" "$P2" "$P3" "$P4" "$P5"; do
     sleep 2
     i=$((i + 1))
   done
-  log warn "   $p — не подошёл (IP и/или Telegram)"
-  # Снова down перед следующим кандидатом — без спама в журнале
+  log warn "   $p — не подошёл как api-proxy (IP и/или Telegram)"
   proxy0_down
 done
 
 [ "$SUCCESS" -eq 0 ] && log err "Не удалось восстановить туннель (IP + Telegram)"
-# Оставляем Proxy0 down, чтобы не сыпались ошибки до следующего Fix
 log warn "Proxy0 оставлен down — запустите Fix снова или поднимите интерфейс вручную"
 exit 1
 FIXSCRIPT
