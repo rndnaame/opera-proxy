@@ -61,8 +61,7 @@ yes_no() {
 print_banner() {
   clear 2>/dev/null || true
   printf '%b\n' "${light_blue}================================================${reset}"
-  printf '%b\n' "${light_blue}Opera-Proxy — меню управления (Keenetic/Entware)${reset}"
-  printf '%b\n' "${light_blue}версия меню: ${bold}${MENU_VERSION}${reset}${light_blue}${reset}"
+  printf '%b\n' "${light_blue}      Opera-Proxy     (Keenetic/Entware)     версия меню: ${bold}${MENU_VERSION}${reset}${light_blue}${reset}"
   printf '%b\n' "${light_blue}================================================${reset}"
   echo ""
 }
