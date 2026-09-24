@@ -619,70 +619,78 @@ fi
 
 log err "✗ Туннель требует восстановления (IP и/или Telegram)"
 
-# Поднять Proxy0 при необходимости
-if ! ip link show t2s0 2>/dev/null | grep -q "state UP"; then
-  log warn "Интерфейс t2s0 DOWN!"
-  if [ -t 0 ]; then
-    echo -n "Включить Proxy0? (y/n): "
-    read -r a
-    case $a in
-      [Yy]*)
-        ndmc -c "interface Proxy0 up" 2>/dev/null
-        ndmc -c "system configuration save" 2>/dev/null
-        sleep 5
-        ;;
-      *) log warn "Отменено"; exit 1 ;;
-    esac
-  else
-    # cron / non-interactive
-    log warn "Включаем Proxy0 (non-interactive)..."
-    ndmc -c "interface Proxy0 up" 2>/dev/null
-    ndmc -c "system configuration save" 2>/dev/null
-    sleep 5
-  fi
-  if tunnel_ok; then
-    log warn "✓ После включения Proxy0 туннель OK"
-    show_config
-    exit 0
-  fi
-fi
+# Proxy0 DOWN на время подбора — иначе в журнале сыпется socks5 session connect
+proxy0_down() {
+  log warn "Proxy0 → down (тишина в журнале на время подбора)"
+  ndmc -c "interface Proxy0 down" 2>/dev/null || true
+  /opt/etc/init.d/S99opera-proxy stop 2>/dev/null || true
+  killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
+  sleep 2
+}
 
-# Остановка перед сменой прокси
-/opt/etc/init.d/S99opera-proxy stop 2>/dev/null
-killall -9 opera-proxy opera-proxy-monitor 2>/dev/null
-sleep 4
+proxy0_up() {
+  log warn "Proxy0 → up"
+  ndmc -c "interface Proxy0 up" 2>/dev/null || true
+  ndmc -c "system configuration save" 2>/dev/null || true
+  sleep 3
+}
+
+proxy0_down
 
 # Список socks5
 TEMP=/tmp/s5.txt
-rm -f "$TEMP"
+POOL=/tmp/s5.pool
+rm -f "$TEMP" "$POOL"
 curl -s -L -m 20 -o "$TEMP" https://databay.com/free-proxy-list/socks5.txt \
   || curl -s -L -m 20 -o "$TEMP" https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt
 
-PROXY_COUNT=$(grep -cE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+" "$TEMP" 2>/dev/null || echo 0)
-log warn "Список прокси: $PROXY_COUNT шт."
+# Нормализация + перемешивание (мёртвые в начале списка иначе едят минуты)
+sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g' "$TEMP" 2>/dev/null \
+  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' \
+  | awk 'BEGIN{srand()} {print rand() "\t" $0}' \
+  | sort -n \
+  | cut -f2- > "$POOL" 2>/dev/null || cp "$TEMP" "$POOL"
 
-# Отбор живых socks5 (до 5 штук)
+PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
+log warn "Список прокси: ${PROXY_COUNT:-0} шт. (перемешан)"
+
+# Быстрый отбор: короткие таймауты, не больше MAX_TEST проверок, до NEED живых
+NEED=5
+MAX_TEST=60
+CT=2
+MT=4
 COUNT=0
+TESTED=0
 P1=""; P2=""; P3=""; P4=""; P5=""
-while IFS= read -r p && [ "$COUNT" -lt 5 ]; do
-  p=$(echo "$p" | tr -d "\r" | sed -E "s|^socks5?h?://||;s|[[:space:]]||g")
-  echo "$p" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$" || continue
-  if curl -x "socks5h://$p" -m 10 --connect-timeout 7 -s -o /dev/null -w "%{http_code}" \
+
+log warn "Быстрый отбор (таймаут ${CT}с, макс ${MAX_TEST} проверок)..."
+while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$MAX_TEST" ]; do
+  [ -z "$p" ] && continue
+  TESTED=$((TESTED + 1))
+  if curl -x "socks5h://$p" -m "$MT" --connect-timeout "$CT" -s -o /dev/null -w "%{http_code}" \
       http://api.ipify.org 2>/dev/null | grep -q "^200$"; then
     COUNT=$((COUNT + 1))
     eval "P$COUNT=\$p"
-    log notice "   кандидат #$COUNT: $p"
+    log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
   fi
-done < "$TEMP"
+done < "$POOL"
 
-[ -z "$P1" ] && [ -s "$TEMP" ] && P1=$(head -n1 "$TEMP" | tr -d "\r" | sed -E "s|^socks5?h?://||;s|[[:space:]]||g")
+log warn "Отбор: найдено $COUNT / нужно $NEED (проверено $TESTED за ~$((TESTED * CT))с макс)"
+
+[ -z "$P1" ] && [ -s "$POOL" ] && P1=$(head -n1 "$POOL")
 P2=${P2:-$P1}; P3=${P3:-$P1}; P4=${P4:-$P1}; P5=${P5:-$P1}
+
+if [ -z "$P1" ]; then
+  log err "Нет ни одного кандидата socks5"
+  proxy0_up
+  exit 1
+fi
 
 start() {
   echo "OPTIONS=\"-socks-mode -country EU $1\"" > /opt/etc/opera-proxy.conf
   /opt/etc/init.d/S99opera-proxy stop 2>/dev/null
   killall -9 opera-proxy 2>/dev/null
-  sleep 3
+  sleep 2
   /opt/etc/init.d/S99opera-proxy start
 }
 
@@ -691,7 +699,8 @@ for p in "$P1" "$P2" "$P3" "$P4" "$P5"; do
   [ -z "$p" ] && continue
   log warn "Пробуем socks5://$p"
   start "-api-proxy socks5://$p"
-  sleep 10
+  sleep 6
+  proxy0_up
   i=1
   while [ "$i" -le 8 ]; do
     if tunnel_ok; then
@@ -706,9 +715,13 @@ for p in "$P1" "$P2" "$P3" "$P4" "$P5"; do
     i=$((i + 1))
   done
   log warn "   $p — не подошёл (IP и/или Telegram)"
+  # Снова down перед следующим кандидатом — без спама в журнале
+  proxy0_down
 done
 
 [ "$SUCCESS" -eq 0 ] && log err "Не удалось восстановить туннель (IP + Telegram)"
+# Оставляем Proxy0 down, чтобы не сыпались ошибки до следующего Fix
+log warn "Proxy0 оставлен down — запустите Fix снова или поднимите интерфейс вручную"
 exit 1
 FIXSCRIPT
 
