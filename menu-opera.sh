@@ -175,12 +175,13 @@ configure_proxy0() {
     ndmc -c "interface Proxy0" 2>/dev/null || true
     ndmc -c "interface Proxy0 proxy protocol socks5" 2>/dev/null || true
     ndmc -c "interface Proxy0 proxy socks5" 2>/dev/null || true
+    ndmc -c "no interface Proxy0 proxy socks5-udp" 2>/dev/null || true
     ndmc -c "interface Proxy0 proxy upstream 127.0.0.1 18080" 2>/dev/null || true
     ndmc -c "interface Proxy0 ip global auto" 2>/dev/null || true
     ndmc -c "interface Proxy0 description OperaProxy" 2>/dev/null || true
     ndmc -c "interface Proxy0 up" 2>/dev/null || true
     ndmc -c "system configuration save" 2>/dev/null || true
-    echo "   ✓ Команды ndmc выполнены"
+    echo "   ✓ Команды ndmc выполнены (socks5-udp off)"
   else
     echo "   ⚠ ndmc не найден — настройте Proxy0 вручную"
   fi
@@ -745,75 +746,68 @@ if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
   exit 1
 fi
 
-# Быстрая проверка socks5 (короткие таймауты)
+# Быстрая проверка socks5: сначала HTTP (быстрее), потом HTTPS
 socks5_ok() {
   _p="$1"
-  _code=$(curl -x "socks5h://$_p" -m 4 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
-    https://api.ipify.org 2>/dev/null)
-  [ "$_code" = "200" ] && return 0
   _code=$(curl -x "socks5h://$_p" -m 3 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
     http://api.ipify.org 2>/dev/null)
+  [ "$_code" = "200" ] && return 0
+  _code=$(curl -x "socks5h://$_p" -m 4 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
+    https://api.ipify.org 2>/dev/null)
   [ "$_code" = "200" ] && return 0
   return 1
 }
 
-# Параллельный отбор: батчи по PARALLEL, до NEED живых, макс MAX_TEST проверок
+# Последовательный отбор (надёжнее на busybox, чем parallel &)
 NEED=3
-MAX_TEST=40
-PARALLEL=5
+MAX_TEST=50
 COUNT=0
 TESTED=0
 CANDS=""
-OKFILE=/tmp/s5.ok
-rm -f "$OKFILE"
-: > "$OKFILE"
 
-log warn "Отбор socks5 (параллельно ×${PARALLEL}, макс ${MAX_TEST})..."
+log warn "Отбор socks5 (последовательно, макс ${MAX_TEST}, stop at ${NEED})..."
 
-# Берём первые MAX_TEST из пула в батчи
-head -n "$MAX_TEST" "$POOL" > /tmp/s5.slice
-BATCH=""
-BATCH_N=0
-flush_batch() {
-  [ -z "$BATCH" ] && return 0
-  for _bp in $BATCH; do
-    (
-      if socks5_ok "$_bp"; then
-        echo "$_bp" >> "$OKFILE"
-      fi
-    ) &
-  done
-  wait
-  BATCH=""
-  BATCH_N=0
-}
-
-while IFS= read -r p; do
+while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$MAX_TEST" ]; do
   [ -z "$p" ] && continue
+  case " $CANDS " in *" $p "*) continue ;; esac
   TESTED=$((TESTED + 1))
-  BATCH="$BATCH $p"
-  BATCH_N=$((BATCH_N + 1))
-  if [ "$BATCH_N" -ge "$PARALLEL" ]; then
-    flush_batch
-    # сколько уже нашли?
-    COUNT=$(grep -cE '^[0-9]' "$OKFILE" 2>/dev/null || echo 0)
-    [ "$COUNT" -ge "$NEED" ] 2>/dev/null && break
+  # прогресс каждые 10
+  if [ $((TESTED % 10)) -eq 0 ]; then
+    log notice "   ... проверено $TESTED, найдено $COUNT"
   fi
-done < /tmp/s5.slice
-flush_batch
-COUNT=$(grep -cE '^[0-9]' "$OKFILE" 2>/dev/null || echo 0)
+  if socks5_ok "$p"; then
+    COUNT=$((COUNT + 1))
+    CANDS="$CANDS $p"
+    log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
+  fi
+done < "$POOL"
 
-# Уникальные кандидаты
-CANDS=$(sort -u "$OKFILE" 2>/dev/null | head -n "$NEED" | tr '\n' ' ')
-COUNT=$(echo "$CANDS" | wc -w | tr -d ' ')
-log warn "Отбор: найдено ${COUNT:-0} за ${TESTED} проверок (×${PARALLEL})"
+# Второй проход, если пусто
+if [ "$COUNT" -lt 1 ]; then
+  log warn "0 кандидатов — второй проход (+50)..."
+  tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
+  if [ -s /tmp/s5.pool2 ]; then
+    while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt 100 ]; do
+      [ -z "$p" ] && continue
+      case " $CANDS " in *" $p "*) continue ;; esac
+      TESTED=$((TESTED + 1))
+      if socks5_ok "$p"; then
+        COUNT=$((COUNT + 1))
+        CANDS="$CANDS $p"
+        log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
+      fi
+    done < /tmp/s5.pool2
+  fi
+fi
 
-if [ -z "$CANDS" ] || [ "${COUNT:-0}" -lt 1 ]; then
+log warn "Отбор: найдено $COUNT за $TESTED проверок"
+
+if [ -z "$CANDS" ] || [ "$COUNT" -lt 1 ]; then
   log err "Нет пригодных socks5 — список мёртв или недоступен"
   exit 1
 fi
 for _c in $CANDS; do
-  log notice "   кандидат: $_c"
+  log notice "   → $_c"
 done
 
 start() {
