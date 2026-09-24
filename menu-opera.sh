@@ -7,6 +7,12 @@
 # Запуск:
 #   sh menu-opera.sh
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
+#
+# История версий:
+#   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
+#   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
+
+MENU_VERSION="1.1.0"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -56,6 +62,7 @@ print_banner() {
   clear 2>/dev/null || true
   printf '%b\n' "${light_blue}================================================${reset}"
   printf '%b\n' "${light_blue}Opera-Proxy — меню управления (Keenetic/Entware)${reset}"
+  printf '%b\n' "${light_blue}версия меню: ${bold}${MENU_VERSION}${reset}${light_blue}${reset}"
   printf '%b\n' "${light_blue}================================================${reset}"
   echo ""
 }
@@ -133,10 +140,18 @@ show_status() {
     printf "   Сервис      : %bнет init-скрипта%b\n" "$red" "$reset"
   fi
 
+  find_opera_iface 2>/dev/null || IFACE="Proxy0"
+  T2S=$(iface_to_t2s "$IFACE")
+  T2S0_UP=0
+  if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
+    T2S0_UP=1
+  elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
+    T2S0_UP=1
+  fi
   if [ "$T2S0_UP" = "1" ]; then
-    printf "   t2s0 (Proxy0): %bUP%b\n" "$green" "$reset"
+    printf "   %s (%s): %bUP%b\n" "$T2S" "$IFACE" "$green" "$reset"
   else
-    printf "   t2s0 (Proxy0): %bDOWN / нет%b\n" "$yellow" "$reset"
+    printf "   %s (%s): %bDOWN / нет%b\n" "$T2S" "$IFACE" "$yellow" "$reset"
   fi
 
   if [ "$FIX_EXISTS" = "1" ]; then
@@ -234,13 +249,23 @@ find_opera_iface() {
   [ -z "$IFACE" ] && IFACE="Proxy0"
 }
 
+# Proxy0 → t2s0, Proxy1 → t2s1, ...
+iface_to_t2s() {
+  _if="${1:-Proxy0}"
+  _n=$(echo "$_if" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
+  [ -z "$_n" ] && _n=0
+  echo "t2s$_n"
+}
+
 opera_iface_exists() {
-  find_opera_iface
-  # уже есть «наш» iface с description?
+  # true только если уже есть iface с description Opera/OperaProxy
+  if ! command -v ndmc >/dev/null 2>&1; then
+    return 1
+  fi
   _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
-  printf '%s\n' "$_rc" | awk -v want="$IFACE" '
+  printf '%s\n' "$_rc" | awk '
     /^interface Proxy[0-9]+/ { cur=$2 }
-    cur==want && /description.*(OperaProxy|Opera)/ { found=1 }
+    /description.*(OperaProxy|Opera)/ { found=1 }
     END { exit found?0:1 }
   ' 2>/dev/null
 }
@@ -281,15 +306,17 @@ configure_proxy0() {
 }
 
 check_tunnel_quick() {
+  find_opera_iface 2>/dev/null || IFACE="Proxy0"
+  T2S=$(iface_to_t2s "$IFACE")
   echo ""
-  echo "→ Проверка туннеля (t2s0) ..."
+  echo "→ Проверка туннеля ($T2S / $IFACE) ..."
   sleep 3
   _ok=0
-  if curl --interface t2s0 -s -m 8 myip.wtf 2>/dev/null; then
+  if curl --interface "$T2S" -s -m 8 myip.wtf 2>/dev/null; then
     echo ""
     _ok=1
   fi
-  if curl --interface t2s0 -s -m 8 2ip.io 2>/dev/null; then
+  if curl --interface "$T2S" -s -m 8 2ip.io 2>/dev/null; then
     echo ""
     _ok=1
   fi
@@ -642,10 +669,12 @@ update_opera_bin() {
   /opt/etc/init.d/S99opera-proxy restart 2>/dev/null && echo "Сервис перезапущен" || true
 
   sleep 5
-  echo "🌐 Проверка t2s0:"
-  curl --interface t2s0 -s -m 8 2ip.io 2>/dev/null || echo "2ip.io: нет"
+  find_opera_iface 2>/dev/null || IFACE="Proxy0"
+  T2S=$(iface_to_t2s "$IFACE")
+  echo "🌐 Проверка $T2S ($IFACE):"
+  curl --interface "$T2S" -s -m 8 2ip.io 2>/dev/null || echo "2ip.io: нет"
   echo ""
-  curl --interface t2s0 -s -m 8 ifconfig.co 2>/dev/null || echo "ifconfig.co: нет"
+  curl --interface "$T2S" -s -m 8 ifconfig.co 2>/dev/null || echo "ifconfig.co: нет"
   echo ""
   echo "=== Готово ==="
 }
@@ -681,14 +710,18 @@ show_config() {
   [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"
 }
 
-# Проверка IP через t2s0 (Keenetic Proxy0)
+# IFACE/T2S задаются выше в fix-скрипте; fallback Proxy0/t2s0
+[ -z "$IFACE" ] && IFACE="Proxy0"
+[ -z "$T2S" ] && T2S="t2s0"
+
+# Проверка IP через Keenetic tunnel iface
 check_ip() {
-  LAST_IP=$(curl --interface t2s0 -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
+  LAST_IP=$(curl --interface "$T2S" -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
   echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
 }
 
 check_telegram() {
-  code=$(curl --interface t2s0 -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+  code=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
     -L https://web.telegram.org 2>/dev/null)
   case "$code" in
     200|301|302|303|307|308) return 0 ;;
@@ -715,12 +748,12 @@ check_telegram_local() {
 # Полная проверка туннеля Keenetic (t2s0)
 tunnel_ok() {
   if ! check_ip; then
-    log err "✗ IP через t2s0: нет"
+    log err "✗ IP через $T2S: нет"
     return 1
   fi
   log warn "✓ IP: $LAST_IP"
   if ! check_telegram; then
-    log err "✗ Telegram через t2s0: нет"
+    log err "✗ Telegram через $T2S: нет"
     return 1
   fi
   log warn "✓ Telegram: OK"
@@ -736,7 +769,7 @@ fi
 
 log err "✗ Туннель требует восстановления (IP и/или Telegram)"
 
-# IFACE по description Opera/OperaProxy
+# IFACE по description Opera/OperaProxy → t2sN
 IFACE="Proxy0"
 _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
 _found=$(printf '%s\n' "$_rc" | awk '
@@ -744,7 +777,10 @@ _found=$(printf '%s\n' "$_rc" | awk '
   /description.*(OperaProxy|Opera)/ { print cur; exit }
 ')
 [ -n "$_found" ] && IFACE="$_found"
-log notice "Интерфейс: $IFACE"
+_n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9][0-9]*\)$/\1/p')
+[ -z "$_n" ] && _n=0
+T2S="t2s$_n"
+log notice "Интерфейс: $IFACE ($T2S)"
 
 proxy0_down() {
   log warn "$IFACE → down (тишина в журнале на время подбора)"
@@ -1065,19 +1101,26 @@ toggle_service() {
 # ---------------------------------------------------------------------------
 check_proxy() {
   print_banner
-  printf '%b\n' "${bold}[6] Проверка прокси (через t2s0)${reset}"
+  find_opera_iface 2>/dev/null || IFACE="Proxy0"
+  T2S=$(iface_to_t2s "$IFACE")
+  printf '%b\n' "${bold}[6] Проверка прокси (через $T2S / $IFACE)${reset}"
   echo ""
 
   detect_installed
 
-  # Статус интерфейса
-  if [ "$T2S0_UP" = "1" ]; then
-    printf "   Интерфейс t2s0 : %bUP%b\n" "$green" "$reset"
+  _up=0
+  if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
+    _up=1
+  elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
+    _up=1
+  fi
+  if [ "$_up" = "1" ]; then
+    printf "   Интерфейс %s : %bUP%b\n" "$T2S" "$green" "$reset"
   else
-    printf "   Интерфейс t2s0 : %bDOWN / отсутствует%b\n" "$red" "$reset"
+    printf "   Интерфейс %s : %bDOWN / отсутствует%b\n" "$T2S" "$red" "$reset"
     echo ""
-    echo "⚠ Без активного t2s0 проверка через Proxy0 невозможна."
-    echo "   Включите Proxy0 или выполните Fix (пункт 4)."
+    echo "⚠ Без активного $T2S проверка через $IFACE невозможна."
+    echo "   Включите $IFACE или выполните Fix (пункт 4)."
     return 1
   fi
 
@@ -1128,7 +1171,7 @@ check_proxy() {
 
   # --- myip.wtf ---
   printf "  ▶ myip.wtf  ... "
-  _out=$(curl --interface t2s0 -s -m 10 --connect-timeout 6 myip.wtf 2>/dev/null)
+  _out=$(curl --interface "$T2S" -s -m 10 --connect-timeout 6 myip.wtf 2>/dev/null)
   if [ -n "$_out" ]; then
     printf '%bOK%b\n' "$green" "$reset"
     echo "$_out" | sed 's/^/    /'
@@ -1140,7 +1183,7 @@ check_proxy() {
 
   # --- 2ip.io ---
   printf "  ▶ 2ip.io    ... "
-  _out=$(curl --interface t2s0 -s -m 10 --connect-timeout 6 2ip.io 2>/dev/null)
+  _out=$(curl --interface "$T2S" -s -m 10 --connect-timeout 6 2ip.io 2>/dev/null)
   if [ -n "$_out" ]; then
     printf '%bOK%b\n' "$green" "$reset"
     _ip=$(echo "$_out" | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | head -1)
@@ -1162,7 +1205,7 @@ check_proxy() {
 
   # --- web.telegram.org ---
   printf "  ▶ web.telegram.org  ... "
-  _code=$(curl --interface t2s0 -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+  _code=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
     -L https://web.telegram.org 2>/dev/null)
   case "$_code" in
     200|301|302|303|307|308)
@@ -1283,6 +1326,7 @@ update_menu_script() {
   print_banner
   printf '%b\n' "${bold}[99] Обновление скрипта меню${reset}"
   echo ""
+  echo "Текущая версия: $MENU_VERSION"
   echo "Источник: $SCRIPT_URL"
   echo ""
 
