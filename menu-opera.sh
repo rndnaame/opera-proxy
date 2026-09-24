@@ -12,7 +12,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.0"
+MENU_VERSION="1.1.1"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -61,7 +61,7 @@ yes_no() {
 print_banner() {
   clear 2>/dev/null || true
   printf '%b\n' "${light_blue}================================================${reset}"
-  printf '%b\n' "${light_blue}      Opera-Proxy     (Keenetic/Entware)     версия меню: ${bold}${MENU_VERSION}${reset}${light_blue}${reset}"
+  printf '%b\n' "${light_blue}Opera-Proxy (Keenetic/Entware) версия меню: ${bold}${MENU_VERSION}${reset}${light_blue}${reset}"
   printf '%b\n' "${light_blue}================================================${reset}"
   echo ""
 }
