@@ -69,6 +69,11 @@
 #           a reason: interrupt signal received" при stop/restart; остановка
 #           шлёт SIGTERM (graceful shutdown), читатель останавливается вместе
 #           с сервисом; при отсутствии logger — фолбэк tail -F в файл лога.
+#   1.2.17 — исправлен daemon_cmd (wrapper v7): перенаправления вынесены из
+#           функции
+#           (раньше "cmd ... >FIFO" внутри функции терялись, демон падал при
+#           закрытии SSH-терминала); запуск в собственной сессии через
+#           setsid sh -c exec + фоновый режим с корректным pidfile.
 #   1.2.16 — запуск демона через setsid/nohup (перехват SIGHUP): случайные
 #           "Server terminated with a reason: interrupt signal received" больше
 #           не возникают, даже если терминал SSH закрывается или shell рассылает
@@ -92,7 +97,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.16"
+MENU_VERSION="1.2.17"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1833,7 +1838,7 @@ init_has_logger() {
 write_syslog_init_wrapper() {
   cat > "$1" << 'WRAPEOF'
 #!/bin/sh
-### menu-opera syslog wrapper v6 (v1.2.16) ###
+### menu-opera syslog wrapper v7 (v1.2.17) ###
 # Управляет opera-proxy и шлёт весь вывод демона в системный журнал Keenetic.
 # Логирование реализовано через FIFO + фоновый читатель (logger/tail), а не
 # конвейер "daemon | logger": демон НЕ является частью пайпа, поэтому сигналы
@@ -1952,15 +1957,17 @@ stop_reader() {
 }
 
 daemon_cmd() {
-    # $1 = путь к демону, $2... = аргументы.
+    # $@ = полная команда запуска (например: /opt/sbin/opera-proxy $OPTIONS).
+    # Вызов должен быть с перенаправлениями вне функции, например:
+    #   daemon_cmd "$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1 &
+    # Перенаправления наследуются через exec, pid пишется из $!.
     # Запуск в собственной сессии (setsid) — защита от SIGHUP при закрытии
     # SSH-терминала и от рассылки сигналов группе процессов shell.
-    _d="$1"; shift
     if command -v setsid >/dev/null 2>&1; then
-        setsid "$_d" "$@" &
+        setsid sh -c 'exec "$0" "$@"' "$@" &
     else
         trap '' HUP
-        "$_d" "$@" &
+        "$@" &
     fi
     echo $! > "$PIDFILE"
 }
@@ -1974,13 +1981,13 @@ do_start() {
         # (исправление "Server terminated ... interrupt signal received").
         start_reader
         if [ -p "$FIFO" ]; then
-            daemon_cmd "$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1
+            daemon_cmd "$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1 &
         else
-            daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1
+            daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &
         fi
     else
         stop_reader
-        daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1
+        daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &
     fi
     _i=0
     while [ $_i -lt 5 ]; do
