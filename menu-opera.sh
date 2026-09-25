@@ -1522,7 +1522,7 @@ init_has_logger() {
 write_syslog_init_wrapper() {
   cat > "$1" << 'WRAPEOF'
 #!/bin/sh
-### menu-opera syslog wrapper v3 (v1.2.2) ###
+### menu-opera syslog wrapper v4 (v1.2.3) ###
 # Управляет opera-proxy и шлёт весь вывод демона в системный журнал Keenetic.
 # При stop соответствующий интерфейс Opera (t2sN) уходит в DOWN, при start — UP.
 # Отключение логирования: удалите строку LOG_TO_SYSLOG="yes" в /opt/etc/opera-proxy.conf
