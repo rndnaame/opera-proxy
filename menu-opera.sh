@@ -12,6 +12,7 @@
 #   1.1.6 — пункт [6]: сверка порта SOCKS (конфиг/процесс/t2sN), тест по фактическому
 #           порту, предложение исправить порт t2s + перезапуск сервиса и повторный тест
 #   1.1.7 — дефолтный порт везде 18080; пункт [7] при смене BIND_PORT проверяет/синхронизирует upstream t2sN
+#   1.1.8 — пункт [7]: выбор COUNTRY и VERBOSITY через нумерованное подменю
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -19,7 +20,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.7"
+MENU_VERSION="1.1.8"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1498,12 +1499,22 @@ config_menu() {
     _cc=$(ask "Выбор [1-7 / l / s / x / 0]: " "0")
     case "$_cc" in
       1)
-        _v=$(ask "Регион EU/AS/AM [$_country]: " "$_country")
-        _vu=$(printf '%s' "$_v" | tr 'a-z' 'A-Z')
-        case "$_vu" in
-          EU|AS|AM) conf_set COUNTRY "$_vu"; rebuild_options; printf '%b✓ COUNTRY = %s%b\n' "$green" "$_vu" "$reset" ;;
-          *) printf '%b⚠ Неверное значение: %s (нужно EU, AS или AM)%b\n' "$red" "$_v" "$reset" ;;
+        echo ""
+        echo "Выберите регион (COUNTRY):"
+        echo "  [1] EU (Европа)"
+        echo "  [2] AS (Азия)"
+        echo "  [3] AM (Америка)"
+        echo "  [0] Отмена"
+        _v=$(ask "Ваш выбор [текущий: $_country]: " "")
+        case "$_v" in
+          1|EU|eu|Европа) _vu="EU" ;;
+          2|AS|as|Азия)   _vu="AS" ;;
+          3|AM|am|Америка) _vu="AM" ;;
+          0) printf '   Отменено.\n'; sleep 1; continue ;;
+          *) printf '%b⚠ Неверный выбор: %s (нужно 1, 2 или 3)%b\n' "$red" "$_v" "$reset"; sleep 1; continue ;;
         esac
+        conf_set COUNTRY "$_vu"; rebuild_options
+        printf '%b✓ COUNTRY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in EU) echo Европа;; AS) echo Азия;; AM) echo Америка;; esac)" "$reset"
         sleep 1
         ;;
       2)
@@ -1585,11 +1596,24 @@ config_menu() {
         sleep 1
         ;;
       7)
-        _v=$(ask "VERBOSITY 10|20|30|40 [$_verb]: " "$_verb")
+        echo ""
+        echo "Выберите уровень логирования (VERBOSITY):"
+        echo "  [1] 10 — debug (подробная отладка)"
+        echo "  [2] 20 — info (информационный)"
+        echo "  [3] 30 — warn (предупреждения; по умолчанию)"
+        echo "  [4] 40 — error (только ошибки)"
+        echo "  [0] Отмена"
+        _v=$(ask "Ваш выбор [текущий: $_verb]: " "")
         case "$_v" in
-          10|20|30|40) conf_set VERBOSITY "$_v"; rebuild_options; printf '%b✓ VERBOSITY = %s%b\n' "$green" "$_v" "$reset" ;;
-          *) printf '%b⚠ Допустимы 10, 20, 30, 40%b\n' "$red" "$reset" ;;
+          1|10) _vu="10" ;;
+          2|20) _vu="20" ;;
+          3|30) _vu="30" ;;
+          4|40) _vu="40" ;;
+          0) printf '   Отменено.\n'; sleep 1; continue ;;
+          *) printf '%b⚠ Неверный выбор: %s (нужно 1-4)%b\n' "$red" "$_v" "$reset"; sleep 1; continue ;;
         esac
+        conf_set VERBOSITY "$_vu"; rebuild_options
+        printf '%b✓ VERBOSITY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in 10) echo debug;; 20) echo info;; 30) echo warn;; 40) echo error;; esac)" "$reset"
         sleep 1
         ;;
       l|L)
