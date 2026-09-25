@@ -69,6 +69,11 @@
 #           a reason: interrupt signal received" при stop/restart; остановка
 #           шлёт SIGTERM (graceful shutdown), читатель останавливается вместе
 #           с сервисом; при отсутствии logger — фолбэк tail -F в файл лога.
+#   1.2.18 — пункт [4] Fix: в fix_opera_tunnel.sh добавлено определение функции
+#           curl_get() (fix-скрипт пишется отдельным heredoc и запускается
+#           cron'ом вне menu-opera.sh — раньше все источники socks5 давали
+#           "curl_get: not found" и подбор шёл только из кэша); LOCAL_SOCKS в
+#           fix-скрипте теперь берёт BIND_PORT из конфига (дефолт 18080).
 #   1.2.17 — исправлен daemon_cmd (wrapper v7): перенаправления вынесены из
 #           функции
 #           (раньше "cmd ... >FIFO" внутри функции терялись, демон падал при
@@ -97,7 +102,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.17"
+MENU_VERSION="1.2.18"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -818,6 +823,34 @@ log() {
   logger -p user."$1" -t "$TAG" "$2" 2>/dev/null || true
 }
 
+# curl_get — скачивание URL (для GitHub — зеркала ghfast/gh-proxy).
+# ВАЖНО: fix-скрипт пишется в файл отдельным heredoc и запускается cron'ом
+# вне контекста menu-opera.sh, поэтому функция продублирована здесь.
+curl_get() {
+  _u="$1"
+  _out="$2"
+  rm -f "$_out"
+  if curl -sL -m 12 --connect-timeout 6 -o "$_out" "$_u" 2>/dev/null && [ -s "$_out" ]; then
+    return 0
+  fi
+  case "$_u" in
+    https://raw.githubusercontent.com/*)
+      for _px in \
+        "https://ghfast.top/$_u" \
+        "https://gh-proxy.com/$_u" \
+        "https://mirror.ghproxy.com/$_u"
+      do
+        rm -f "$_out"
+        if curl -sL -m 15 --connect-timeout 8 -o "$_out" "$_px" 2>/dev/null && [ -s "$_out" ]; then
+          return 0
+        fi
+      done
+      ;;
+  esac
+  rm -f "$_out"
+  return 1
+}
+
 show_config() {
   [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"
 }
@@ -842,7 +875,10 @@ check_telegram() {
 }
 
 # Проверка напрямую через локальный SOCKS opera-proxy (без Proxy0)
-LOCAL_SOCKS="127.0.0.1:18080"
+# Порт из конфига (BIND_PORT), по умолчанию 18080
+LOCAL_SOCKS="127.0.0.1:$(sed -n 's/^[[:space:]]*BIND_PORT="\{0,1\}\([0-9]\{1,5\}\)"\{0,1\}.*/\1/p' /opt/etc/opera-proxy.conf 2>/dev/null | head -1)"
+[ -z "$LOCAL_SOCKS" ] && LOCAL_SOCKS="127.0.0.1:18080"
+case "$LOCAL_SOCKS" in *:*) : ;; *) LOCAL_SOCKS="127.0.0.1:18080" ;; esac
 check_ip_local() {
   LAST_IP=$(curl --socks5-hostname "$LOCAL_SOCKS" -m 10 --connect-timeout 6 -s https://api.ipify.org 2>/dev/null)
   echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
