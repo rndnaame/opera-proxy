@@ -13,6 +13,9 @@
 #           порту, предложение исправить порт t2s + перезапуск сервиса и повторный тест
 #   1.1.7 — дефолтный порт везде 18080; пункт [7] при смене BIND_PORT проверяет/синхронизирует upstream t2sN
 #   1.1.8 — пункт [7]: выбор COUNTRY и VERBOSITY через нумерованное подменю
+#   1.1.9 — логирование в журнал Keenetic: п.7[7] предлагает включить logger,
+#           новый пункт [g] в настройке конфига (автоматическая logger-обёртка
+#           в S99opera-proxy с backup; rc.func сам по себе stderr в syslog не пишет)
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -20,7 +23,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.8"
+MENU_VERSION="1.1.9"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1436,6 +1439,61 @@ rebuild_options() {
   conf_set OPTIONS "$r_opts"
 }
 
+# Логирование opera-proxy в системный журнал Keenetic (Мониторинг → Журнал).
+# rc.func запускает бинарник напрямую — stderr процесса никуда не попадает,
+# поэтому логи (даже при VERBOSITY=10) в журнале роутера не видны.
+# Если init-скрипт ещё не обёрнут в logger — ensure_syslog_logging() внедряет
+# запуск вида: $DAEMON $ARGS 2>&1 | logger -t opera-proxy & (с backup оригинала).
+# Возвращает 0, если init-скрипт уже перенаправляет вывод в logger.
+init_has_logger() {
+  [ -f "$OP_INIT" ] && grep -q 'logger -t opera-proxy' "$OP_INIT" 2>/dev/null
+}
+
+# Встроенная обёртка запуска для rc.func-скриптов:
+# вместо прямого вызова $DAEMON поток stderr гонится в syslog через logger.
+ensure_syslog_logging() {
+  if [ ! -f "$OP_INIT" ]; then
+    echo "   ⚠ Init-скрипт $OP_INIT не найден — пропуск"
+    return 1
+  fi
+  if init_has_logger; then
+    echo "   ✓ Логирование в syslog уже настроено ($OP_INIT)"
+    return 0
+  fi
+  _esl_tmp="/tmp/opera-init.$$.tmp"
+  # Типичный Entware/rc.func-скрипт не содержит строку запуска (она внутри rc.func),
+  # поэтому добавляем функцию start_cmd — rc.func использует её вместо прямого запуска.
+  awk '
+    BEGIN { done = 0 }
+    /^\. \/opt\/etc\/init\.d\/rc\.func/ && !done {
+      print "# --- syslog-обёртка (menu-opera): логи opera-proxy -> журнал Keenetic ---"
+      print "start_cmd() {"
+      print "    if [ -n \"$PREARGS\" ]; then"
+      print "        $PREARGS $DAEMON $ARGS 2>&1 | logger -t opera-proxy &"
+      print "    else"
+      print "        $DAEMON $ARGS 2>&1 | logger -t opera-proxy &"
+      print "    fi"
+      print "}"
+      print ""
+      done = 1
+    }
+    { print }
+    END { exit (done ? 0 : 3) }
+  ' "$OP_INIT" > "$_esl_tmp" 2>/dev/null
+  _esl_rc=$?
+  if [ "$_esl_rc" -ne 0 ] || [ ! -s "$_esl_tmp" ]; then
+    rm -f "$_esl_tmp"
+    echo "   ⚠ Не удалось автоматически внедрить logger-обёртку."
+    echo "     Отредактируйте $OP_INIT вручную: замените запуск на"
+    echo "       \$DAEMON \$ARGS 2>&1 | logger -t opera-proxy &"
+    return 1
+  fi
+  cp "$OP_INIT" "${OP_INIT}.bak.$(date +%s)" 2>/dev/null || true
+  mv "$_esl_tmp" "$OP_INIT" && chmod +x "$OP_INIT" 2>/dev/null
+  echo "   ✓ Логирование включено: вывод → syslog (тег opera-proxy)"
+  echo "     Backup: ${OP_INIT}.bak.*"
+}
+
 config_menu() {
   print_banner
   printf '%b\n' "${bold}[7] Настройка конфига${reset}"
@@ -1489,6 +1547,7 @@ config_menu() {
     echo "  [6] Изменить SERVER_SELECT"
     echo "  [7] Изменить VERBOSITY"
     echo "  [l] Показать конфиг целиком"
+    echo "  [g] Логирование в журнал Keenetic (syslog/logger)"
     echo "  [s] Сохранить + перезапустить сервис"
     echo "  [x] Сбросить к конфигу по умолчанию"
     echo "  [0] Выход из настройки"
@@ -1496,7 +1555,7 @@ config_menu() {
     printf '%b\n' "${light_blue}OPTIONS пересобирается автоматически при каждом изменении${reset}"
     echo ""
 
-    _cc=$(ask "Выбор [1-7 / l / s / x / 0]: " "0")
+    _cc=$(ask "Выбор [1-7 / l / g / s / x / 0]: " "0")
     case "$_cc" in
       1)
         echo ""
@@ -1614,6 +1673,16 @@ config_menu() {
         esac
         conf_set VERBOSITY "$_vu"; rebuild_options
         printf '%b✓ VERBOSITY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in 10) echo debug;; 20) echo info;; 30) echo warn;; 40) echo error;; esac)" "$reset"
+        # Логи opera-proxy пишутся в stderr; чтобы они попадали в журнал Keenetic,
+        # нужен logger. Проверяем init-скрипт и при необходимости включаем обёртку.
+        if ! init_has_logger; then
+          echo ""
+          printf '%b⚠ В журнале Keenetic логов не будет: rc.func не перенаправляет вывод процесса.%b\n' "$yellow" "$reset"
+          if [ "$(yes_no "   Включить логирование в syslog (logger -t opera-proxy)? [Y/n]: " "y")" = "1" ]; then
+            ensure_syslog_logging \
+              && echo "   После включения выполните [s] (сохранить + перезапустить сервис)."
+          fi
+        fi
         sleep 1
         ;;
       l|L)
@@ -1621,6 +1690,18 @@ config_menu() {
         printf '%b\n' "${light_blue}───── $OP_CONF_FILE ─────${reset}"
         cat "$OP_CONF_FILE" 2>/dev/null | sed 's/^/  /'
         printf '%b\n' "${light_blue}──────────────────────────${reset}"
+        ask "Нажмите Enter для возврата... " ""
+        ;;
+      g|G)
+        echo ""
+        printf '%b\n' "${light_blue}───── Логирование в журнал Keenetic (syslog) ─────${reset}"
+        ensure_syslog_logging
+        if init_has_logger; then
+          echo ""
+          echo "Просмотр логов:"
+          echo "  • Веб-интерфейс: Мониторинг → Журнал (фильтр 'opera-proxy')"
+          echo "  • Консоль:       dmesg | grep -i opera   (или logread, если доступен)"
+        fi
         ask "Нажмите Enter для возврата... " ""
         ;;
       s|S)
