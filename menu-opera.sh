@@ -9,11 +9,12 @@
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
 #
 # История версий:
+#   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
 #   1.1.2 — пункт [6]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.2"
+MENU_VERSION="1.1.3"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1169,17 +1170,6 @@ check_proxy() {
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
   printf '%b\n' "${bold}  Параметры opera-proxy${reset}"
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  if [ -f /opt/etc/opera-proxy.conf ]; then
-    echo ""
-    echo "  Конфиг: /opt/etc/opera-proxy.conf"
-    while IFS= read -r _line || [ -n "$_line" ]; do
-      [ -z "$_line" ] && continue
-      echo "    $_line"
-    done < /opt/etc/opera-proxy.conf
-  else
-    echo ""
-    echo "  Конфиг: нет (/opt/etc/opera-proxy.conf)"
-  fi
   # Фактическая командная строка процесса
   _cmdline=""
   _pid=$(pgrep -f "[o]pera-proxy" 2>/dev/null | head -1)
@@ -1255,14 +1245,37 @@ check_proxy() {
   esac
   echo ""
 
+  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
+  printf '%b\n' "${bold}  Google (через интерфейс $T2S)${reset}"
+  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
+  echo ""
+
+  # --- google.com через t2S-интерфейс ---
+  printf "  ▶ google.com ($T2S)  ... "
+  _code=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+    https://www.google.com/generate_204 2>/dev/null)
+  case "$_code" in
+    204|200|301|302|303|307|308)
+      printf '%bOK%b  (HTTP %s)\n' "$green" "$reset" "$_code"
+      _ok_count=$((_ok_count + 1))
+      ;;
+    000|"")
+      printf '%bнет ответа%b\n' "$red" "$reset"
+      ;;
+    *)
+      printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset"
+      ;;
+  esac
+  echo ""
+
   # Итоговая сводка
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  if [ "$_ok_count" -ge 2 ]; then
-    printf "  Итог: %bSOCKS5 %s работает%b  (%s/3 проверок)\n" "$green" "$LOCAL_SOCKS_CHECK" "$reset" "$_ok_count"
-  elif [ "$_ok_count" -eq 1 ]; then
-    printf "  Итог: %bчастично%b  (%s/3) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
+  if [ "$_ok_count" -ge 3 ]; then
+    printf "  Итог: %bпрокси работает%b  (%s/4 проверок)\n" "$green" "$reset" "$_ok_count"
+  elif [ "$_ok_count" -ge 1 ]; then
+    printf "  Итог: %bчастично%b  (%s/4) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
   else
-    printf "  Итог: %bSOCKS5 %s не отвечает%b  (0/3)\n" "$red" "$reset" "$LOCAL_SOCKS_CHECK"
+    printf "  Итог: %bпрокси не отвечает%b  (0/4)\n" "$red" "$reset"
     echo "        Попробуйте Fix (пункт 4) или перезапуск сервиса (пункт 5)."
   fi
   echo ""
