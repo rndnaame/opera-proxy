@@ -12,7 +12,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.1"
+MENU_VERSION="1.1.2"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1096,17 +1096,33 @@ toggle_service() {
 }
 
 # ---------------------------------------------------------------------------
-# [6] Проверить прокси
+# [6] Проверить прокси (через локальный SOCKS5 127.0.0.1)
 # ---------------------------------------------------------------------------
 check_proxy() {
   print_banner
   find_opera_iface 2>/dev/null || IFACE="Proxy0"
   T2S=$(iface_to_t2s "$IFACE")
-  printf '%b\n' "${bold}[6] Проверка прокси (через $T2S / $IFACE)${reset}"
+  printf '%b\n' "${bold}[6] Проверка прокси через SOCKS5 (127.0.0.1)${reset}"
   echo ""
 
   detect_installed
 
+  # Определяем адрес локального SOCKS5 из конфига (BIND_ADDR/BIND_PORT)
+  _socks_host="127.0.0.1"
+  _socks_port="18080"
+  if [ -f "$OP_CONF_FILE" ]; then
+    _bp=$(sed -n 's/^BIND_PORT="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
+    [ -n "$_bp" ] && _socks_port="$_bp"
+    _ba=$(sed -n 's/^BIND_ADDR="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
+    # 0.0.0.0 — слушает всю систему, для клиента подключаемся на localhost
+    if [ -n "$_ba" ] && [ "$_ba" != "0.0.0.0" ]; then
+      _socks_host="$_ba"
+    fi
+  fi
+  LOCAL_SOCKS_CHECK="${_socks_host}:${_socks_port}"
+  printf "   SOCKS5 proxy    : %b%s%b\n" "$light_blue" "$LOCAL_SOCKS_CHECK" "$reset"
+
+  # Проверка: интерфейс t2S (информативно, без него тоже можно работать через SOCKS)
   _up=0
   if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
     _up=1
@@ -1114,13 +1130,31 @@ check_proxy() {
     _up=1
   fi
   if [ "$_up" = "1" ]; then
-    printf "   Интерфейс %s : %bUP%b\n" "$T2S" "$green" "$reset"
+    printf "   Интерфейс %s  : %bUP%b\n" "$T2S" "$green" "$reset"
   else
-    printf "   Интерфейс %s : %bDOWN / отсутствует%b\n" "$T2S" "$red" "$reset"
+    printf "   Интерфейс %s  : %bDOWN / отсутствует%b (проверяем напрямую через SOCKS)\n" "$T2S" "$yellow" "$reset"
+  fi
+
+  # Жив ли порт SOCKS5 на 127.0.0.1
+  _port_ok=0
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -qE "[:.]${_socks_port}[[:space:]]" && _port_ok=1
+  fi
+  if [ "$_port_ok" = "0" ] && command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE "[:.]${_socks_port}[[:space:]]" && _port_ok=1
+  fi
+  if [ "$_port_ok" = "0" ] && command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 "$_socks_host" "$_socks_port" 2>/dev/null && _port_ok=1
+  fi
+  if [ "$_port_ok" = "1" ]; then
+    printf "   Порт %s        : %bслушается%b\n" "$_socks_port" "$green" "$reset"
+  elif [ "$SVC_RUNNING" = "1" ]; then
+    printf "   Порт %s        : %bне проверен%b (сервис запущен, пробуем запросы)\n" "$_socks_port" "$yellow" "$reset"
+  else
+    printf "   Порт %s        : %bне слушается%b\n" "$_socks_port" "$red" "$reset"
     echo ""
-    echo "⚠ Без активного $T2S проверка через $IFACE невозможна."
-    echo "   Включите $IFACE или выполните Fix (пункт 4)."
-    return 1
+    echo "⚠ Локальный SOCKS5 ($LOCAL_SOCKS_CHECK) недоступен."
+    echo "   Запустите сервис (пункт 5) или выполните Fix (пункт 4)."
   fi
 
   if [ "$SVC_RUNNING" = "1" ]; then
@@ -1162,7 +1196,7 @@ check_proxy() {
   echo ""
 
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  printf '%b\n' "${bold}  IP-сервисы${reset}"
+  printf '%b\n' "${bold}  IP-сервисы (через SOCKS5 $LOCAL_SOCKS_CHECK)${reset}"
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
   echo ""
 
@@ -1170,7 +1204,7 @@ check_proxy() {
 
   # --- myip.wtf ---
   printf "  ▶ myip.wtf  ... "
-  _out=$(curl --interface "$T2S" -s -m 10 --connect-timeout 6 myip.wtf 2>/dev/null)
+  _out=$(curl --socks5-hostname "$LOCAL_SOCKS_CHECK" -s -m 10 --connect-timeout 6 myip.wtf 2>/dev/null)
   if [ -n "$_out" ]; then
     printf '%bOK%b\n' "$green" "$reset"
     echo "$_out" | sed 's/^/    /'
@@ -1182,7 +1216,7 @@ check_proxy() {
 
   # --- 2ip.io ---
   printf "  ▶ 2ip.io    ... "
-  _out=$(curl --interface "$T2S" -s -m 10 --connect-timeout 6 2ip.io 2>/dev/null)
+  _out=$(curl --socks5-hostname "$LOCAL_SOCKS_CHECK" -s -m 10 --connect-timeout 6 2ip.io 2>/dev/null)
   if [ -n "$_out" ]; then
     printf '%bOK%b\n' "$green" "$reset"
     _ip=$(echo "$_out" | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | head -1)
@@ -1204,7 +1238,7 @@ check_proxy() {
 
   # --- web.telegram.org ---
   printf "  ▶ web.telegram.org  ... "
-  _code=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+  _code=$(curl --socks5-hostname "$LOCAL_SOCKS_CHECK" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
     -L https://web.telegram.org 2>/dev/null)
   case "$_code" in
     200|301|302|303|307|308)
@@ -1223,11 +1257,11 @@ check_proxy() {
   # Итоговая сводка
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
   if [ "$_ok_count" -ge 2 ]; then
-    printf "  Итог: %bтуннель работает%b  (%s/3 проверок)\n" "$green" "$reset" "$_ok_count"
+    printf "  Итог: %bSOCKS5 %s работает%b  (%s/3 проверок)\n" "$green" "$LOCAL_SOCKS_CHECK" "$reset" "$_ok_count"
   elif [ "$_ok_count" -eq 1 ]; then
     printf "  Итог: %bчастично%b  (%s/3) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
   else
-    printf "  Итог: %bтуннель не отвечает%b  (0/3)\n" "$red" "$reset"
+    printf "  Итог: %bSOCKS5 %s не отвечает%b  (0/3)\n" "$red" "$reset" "$LOCAL_SOCKS_CHECK"
     echo "        Попробуйте Fix (пункт 4) или перезапуск сервиса (пункт 5)."
   fi
   echo ""
