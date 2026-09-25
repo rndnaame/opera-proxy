@@ -9,12 +9,13 @@
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
 #
 # История версий:
+#   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
 #   1.1.2 — пункт [6]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.3"
+MENU_VERSION="1.1.4"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1282,6 +1283,256 @@ check_proxy() {
 }
 
 # ---------------------------------------------------------------------------
+# [7] Настройка конфига (/opt/etc/opera-proxy.conf)
+# ---------------------------------------------------------------------------
+
+# Шаблон конфига по умолчанию (параметры редактируются в подменю, п.7)
+OPERA_CONF_TEMPLATE='# ─────────────────────────────────────────────────────
+#  Конфигурация opera-proxy для Keenetic (SOCKS5)
+#  После изменений: /opt/etc/init.d/S*opera-proxy restart
+# ─────────────────────────────────────────────────────
+
+# Регион: EU (Европа), AS (Азия), AM (Америка)
+COUNTRY="EU"
+
+# Адрес и порт (0.0.0.0 — доступен роутеру и всей домашней сети)
+BIND_ADDR="0.0.0.0"
+BIND_PORT="1080"
+
+# Обход блокировок ТСПУ/DPI в РФ
+OBFUSCATE="yes"
+FAKE_SNI="2gis.com"
+
+# Защищённый DoH DNS для первичного поиска серверов
+BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+
+# Выбор сервера: random (случайный) или fastest (быстрый)
+SERVER_SELECT="random"
+
+# Уровень логов: 10=debug, 20=info, 30=warn, 40=error
+VERBOSITY="30"
+
+# ── Автогенерация OPTIONS для Entware init.d / rc.func ────────
+OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
+if [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ]; then
+    OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
+fi'
+
+# Прочитать значение переменной из conf (без выполнения if/OPTIONS)
+conf_get() {
+  # $1 = имя переменной; печатает значение (или пусто)
+  sed -n "s/^$1=\"\\{0,1\\}\\([^\"]*\\)\"\\{0,1\\}.*/\\1/p" "$OP_CONF_FILE" 2>/dev/null | head -1
+}
+
+conf_set() {
+  # $1 = имя переменной, $2 = новое значение. Заменяет строку VAR="..." в conf.
+  _tmpc="/tmp/opera-conf.$$.tmp"
+  awk -v k="$1" -v v="$2" '
+    BEGIN { done = 0 }
+    substr($0, 1, length(k) + 1) == k "=" { print k "=\"" v "\""; done = 1; next }
+    { print }
+    END { if (!done) print k "=\"" v "\"" }
+  ' "$OP_CONF_FILE" > "$_tmpc" 2>/dev/null && mv "$_tmpc" "$OP_CONF_FILE" || rm -f "$_tmpc"
+}
+
+config_menu() {
+  print_banner
+  printf '%b\n' "${bold}[7] Настройка конфига${reset}"
+  echo ""
+
+  if [ ! -f "$OP_CONF_FILE" ]; then
+    printf "⚠ Конфиг %b не найден.\n" "$OP_CONF_FILE"
+    if [ "$(yes_no "Создать конфиг по умолчанию? [Y/n]: " "y")" = "1" ]; then
+      printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE" \
+        && printf '%b✓ Создан: %s%b\n' "$green" "$OP_CONF_FILE" "$reset" \
+        || { printf '%b❌ Не удалось записать %s%b\n' "$red" "$OP_CONF_FILE" "$reset"; return 1; }
+    else
+      return 0
+    fi
+  fi
+
+  while true; do
+    print_banner
+    printf '%b\n' "${bold}[7] Настройка конфига${reset}  ${light_blue}$OP_CONF_FILE${reset}"
+    echo ""
+
+    # Текущие значения (с дефолтами, если чего-то нет в conf)
+    _country=$(conf_get COUNTRY);          [ -z "$_country" ] && _country="EU"
+    _bindaddr=$(conf_get BIND_ADDR);       [ -z "$_bindaddr" ] && _bindaddr="0.0.0.0"
+    _bindport=$(conf_get BIND_PORT);       [ -z "$_bindport" ] && _bindport="1080"
+    _obf=$(conf_get OBFUSCATE);            [ -z "$_obf" ] && _obf="yes"
+    _sni=$(conf_get FAKE_SNI);             [ -z "$_sni" ] && _sni="2gis.com"
+    _doh=$(conf_get BOOTSTRAP_DNS);        [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+    _srvsel=$(conf_get SERVER_SELECT);     [ -z "$_srvsel" ] && _srvsel="random"
+    _verb=$(conf_get VERBOSITY);           [ -z "$_verb" ] && _verb="30"
+
+    printf '%b\n' "${light_blue}────────── Текущий конфиг ──────────${reset}"
+    printf "  %-14s: %b%s%b   (EU | AS | AM)\n" "COUNTRY" "$bold" "$_country" "$reset"
+    printf "  %-14s: %b%s%b\n" "BIND_ADDR" "$bold" "$_bindaddr" "$reset"
+    printf "  %-14s: %b%s%b\n" "BIND_PORT" "$bold" "$_bindport" "$reset"
+    printf "  %-14s: %b%s%b   (yes | no)\n" "OBFUSCATE" "$bold" "$_obf" "$reset"
+    printf "  %-14s: %b%s%b\n" "FAKE_SNI" "$bold" "$_sni" "$reset"
+    printf "  %-14s: %b%s%b\n" "BOOTSTRAP_DNS" "$bold" "$_doh" "$reset"
+    printf "  %-14s: %b%s%b   (random | fastest)\n" "SERVER_SELECT" "$bold" "$_srvsel" "$reset"
+    printf "  %-14s: %b%s%b   (10|20|30|40)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
+    _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
+    [ -n "$_api" ] && printf "  %-14s: %b%s%b\n" "API_PROXY" "$yellow" "$_api" "$reset"
+    echo ""
+    printf '%b\n' "${light_blue}──────────────────────────────────────${reset}"
+    echo ""
+    echo "  [a] Изменить COUNTRY (регион)"
+    echo "  [b] Изменить BIND_ADDR (адрес)"
+    echo "  [c] Изменить BIND_PORT (порт)"
+    echo "  [d] Изменить OBFUSCATE + FAKE_SNI"
+    echo "  [e] Изменить BOOTSTRAP_DNS"
+    echo "  [f] Изменить SERVER_SELECT"
+    echo "  [g] Изменить VERBOSITY"
+    echo "  [r] Пересобрать OPTIONS из параметров"
+    echo "  [l] Показать конфиг целиком"
+    echo "  [s] Сохранить + перезапустить сервис"
+    echo "  [x] Сбросить к конфигу по умолчанию"
+    echo "  [0] Выход из настройки"
+    echo ""
+
+    _cc=$(ask "Выбор [a b c d e f g r l s x 0]: " "0")
+    case "$_cc" in
+      a|A)
+        _v=$(ask "Регион EU/AS/AM [$_country]: " "$_country")
+        _vu=$(printf '%s' "$_v" | tr 'a-z' 'A-Z')
+        case "$_vu" in
+          EU|AS|AM) conf_set COUNTRY "$_vu"; printf '%b✓ COUNTRY = %s%b\n' "$green" "$_vu" "$reset" ;;
+          *) printf '%b⚠ Неверное значение: %s (нужно EU, AS или AM)%b\n' "$red" "$_v" "$reset" ;;
+        esac
+        sleep 1
+        ;;
+      b)
+        _v=$(ask "BIND_ADDR [$_bindaddr] (127.0.0.1 — только роутер, 0.0.0.0 — вся сеть): " "$_bindaddr")
+        case "$_v" in
+          *[!0-9.]*|"") printf '%b⚠ Похоже, это не IPv4-адрес%b\n' "$red" "$reset" ;;
+          *) conf_set BIND_ADDR "$_v"; printf '%b✓ BIND_ADDR = %s%b\n' "$green" "$_v" "$reset" ;;
+        esac
+        sleep 1
+        ;;
+      c)
+        _v=$(ask "BIND_PORT [$_bindport]: " "$_bindport")
+        case "$_v" in
+          ''|*[!0-9]*) printf '%b⚠ Порт должен быть числом%b\n' "$red" "$reset" ;;
+          *) if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ] 2>/dev/null; then
+               conf_set BIND_PORT "$_v"; printf '%b✓ BIND_PORT = %s%b\n' "$green" "$_v" "$reset"
+             else printf '%b⚠ Порт вне диапазона 1-65535%b\n' "$red" "$reset"; fi ;;
+        esac
+        sleep 1
+        ;;
+      d|D)
+        _v=$(ask "OBFUSCATE yes/no [$_obf]: " "$_obf")
+        case "$_v" in
+          y|Y|yes|YES|д|Д) conf_set OBFUSCATE "yes"; printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset" ;;
+          n|N|no|NO|нет)   conf_set OBFUSCATE "no";  printf '%b✓ OBFUSCATE = no%b\n' "$green" "$reset" ;;
+          *) printf '%b⚠ Нужно yes или no%b\n' "$red" "$reset" ;;
+        esac
+        _v=$(ask "FAKE_SNI [$_sni]: " "$_sni")
+        if [ -n "$_v" ]; then
+          conf_set FAKE_SNI "$_v"; printf '%b✓ FAKE_SNI = %s%b\n' "$green" "$_v" "$reset"
+        fi
+        sleep 1
+        ;;
+      e)
+        _v=$(ask "BOOTSTRAP_DNS [$_doh]: " "$_doh")
+        case "$_v" in
+          https://*) conf_set BOOTSTRAP_DNS "$_v"; printf '%b✓ BOOTSTRAP_DNS обновлён%b\n' "$green" "$reset" ;;
+          *) printf '%b⚠ Значение должно начинаться с https://%b\n' "$red" "$reset" ;;
+        esac
+        sleep 1
+        ;;
+      f)
+        _v=$(ask "SERVER_SELECT random/fastest [$_srvsel]: " "$_srvsel")
+        case "$_v" in
+          random|fastest) conf_set SERVER_SELECT "$_v"; printf '%b✓ SERVER_SELECT = %s%b\n' "$green" "$_v" "$reset" ;;
+          *) printf '%b⚠ Нужно random или fastest%b\n' "$red" "$reset" ;;
+        esac
+        sleep 1
+        ;;
+      g)
+        _v=$(ask "VERBOSITY 10|20|30|40 [$_verb]: " "$_verb")
+        case "$_v" in
+          10|20|30|40) conf_set VERBOSITY "$_v"; printf '%b✓ VERBOSITY = %s%b\n' "$green" "$_v" "$reset" ;;
+          *) printf '%b⚠ Допустимы 10, 20, 30, 40%b\n' "$red" "$reset" ;;
+        esac
+        sleep 1
+        ;;
+      r|R)
+        # Пересобрать OPTIONS из текущих параметров (сохраняя -api-proxy)
+        _country=$(conf_get COUNTRY);      [ -z "$_country" ] && _country="EU"
+        _bindaddr=$(conf_get BIND_ADDR);   [ -z "$_bindaddr" ] && _bindaddr="0.0.0.0"
+        _bindport=$(conf_get BIND_PORT);   [ -z "$_bindport" ] && _bindport="1080"
+        _obf=$(conf_get OBFUSCATE);        [ -z "$_obf" ] && _obf="yes"
+        _sni=$(conf_get FAKE_SNI)
+        _doh=$(conf_get BOOTSTRAP_DNS);    [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+        _srvsel=$(conf_get SERVER_SELECT); [ -z "$_srvsel" ] && _srvsel="random"
+        _verb=$(conf_get VERBOSITY);       [ -z "$_verb" ] && _verb="30"
+        _opts="-socks-mode -country $_country -bind-address ${_bindaddr}:${_bindport} -server-selection $_srvsel -verbosity $_verb -bootstrap-dns $_doh"
+        [ "$_obf" = "yes" ] && [ -n "$_sni" ] && _opts="$_opts -fake-SNI $_sni"
+        _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
+        [ -n "$_api" ] && _opts="$_opts $_api"
+        conf_set OPTIONS "$_opts"
+        printf '%b✓ OPTIONS пересобран:%b\n' "$green" "$reset"
+        echo "    \"$_opts\""
+        sleep 1
+        ;;
+      l|L)
+        echo ""
+        printf '%b\n' "${light_blue}───── $OP_CONF_FILE ─────${reset}"
+        cat "$OP_CONF_FILE" 2>/dev/null | sed 's/^/  /'
+        printf '%b\n' "${light_blue}──────────────────────────${reset}"
+        ask "Нажмите Enter для возврата... " ""
+        ;;
+      s|S)
+        # Изменения уже сохранены на лету через conf_set; перезапускаем сервис.
+        # Перед перезапуском пересоберём OPTIONS, чтобы он был актуален.
+        _country=$(conf_get COUNTRY);      [ -z "$_country" ] && _country="EU"
+        _bindaddr=$(conf_get BIND_ADDR);   [ -z "$_bindaddr" ] && _bindaddr="0.0.0.0"
+        _bindport=$(conf_get BIND_PORT);   [ -z "$_bindport" ] && _bindport="1080"
+        _obf=$(conf_get OBFUSCATE);        [ -z "$_obf" ] && _obf="yes"
+        _sni=$(conf_get FAKE_SNI)
+        _doh=$(conf_get BOOTSTRAP_DNS);    [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+        _srvsel=$(conf_get SERVER_SELECT); [ -z "$_srvsel" ] && _srvsel="random"
+        _verb=$(conf_get VERBOSITY);       [ -z "$_verb" ] && _verb="30"
+        _opts="-socks-mode -country $_country -bind-address ${_bindaddr}:${_bindport} -server-selection $_srvsel -verbosity $_verb -bootstrap-dns $_doh"
+        [ "$_obf" = "yes" ] && [ -n "$_sni" ] && _opts="$_opts -fake-SNI $_sni"
+        _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
+        [ -n "$_api" ] && _opts="$_opts $_api"
+        conf_set OPTIONS "$_opts"
+        if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+          echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
+          /opt/etc/init.d/S99opera-proxy restart
+          printf '%b✓ Сервис перезапущен. Проверить можно в пункте [6].%b\n' "$green" "$reset"
+        else
+          printf '%b⚠ /opt/etc/init.d/S99opera-proxy не найден — изменения сохранены, но сервис не перезапущен.%b\n' "$yellow" "$reset"
+        fi
+        sleep 2
+        ;;
+      x|X)
+        if [ "$(yes_no "Сбросить конфиг к значениям по умолчанию? [y/N]: " "n")" = "1" ]; then
+          cp "$OP_CONF_FILE" "$OP_CONF_FILE.bak.$(date +%s)" 2>/dev/null
+          printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE" \
+            && printf '%b✓ Конфиг сброшен (backup сохранён рядом).%b\n' "$green" "$reset" \
+            || printf '%b❌ Не удалось записать конфиг%b\n' "$red" "$reset"
+        fi
+        sleep 1
+        ;;
+      0|q|Q|"")
+        echo "Выход из настройки конфига."
+        return 0
+        ;;
+      *)
+        printf '%bНеверный выбор.%b\n' "$red" "$reset"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
 # [88] Удалить Opera-proxy
 # ---------------------------------------------------------------------------
 remove_opera_proxy() {
@@ -1477,12 +1728,13 @@ run_menu() {
     echo "  [4]  Fix Opera (+socks5)"
     echo "  [5]  Остановить / Запустить сервис"
     echo "  [6]  Проверить прокси"
+    echo "  [7]  Настройка конфига"
     echo "  [88] Удалить"
     echo "  [99] Обновить скрипт"
     echo "  [0]  Выход"
     echo ""
 
-    choice=$(ask "Выбор [0-6 / 88 / 99], Enter = выход: " "0")
+    choice=$(ask "Выбор [0-7 / 88 / 99], Enter = выход: " "0")
     case "$choice" in
       1)
         install_opera_menu
@@ -1506,6 +1758,10 @@ run_menu() {
         ;;
       6)
         check_proxy
+        ask "Нажмите Enter для возврата в меню... " ""
+        ;;
+      7)
+        config_menu
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
       88)
