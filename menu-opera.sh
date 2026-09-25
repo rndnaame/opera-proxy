@@ -51,6 +51,10 @@
 #           прослушивания SOCKS-порта; (4) если после исправлений тесты не прошли —
 #           результат показывается один раз (без дублирующего блока), при UP-туннеле
 #           даётся подсказка обождать и повторить п.6.
+#   1.2.10 — пункт [6]: убран повторный прогон тестов. Исправления (порт upstream,
+#           up туннеля, restart) применяются ДО тестов, после ожидания UP/порта
+#           тесты выполняются ровно ОДИН раз — без заголовков «ПОВТОРНАЯ ПРОВЕРКА»
+#           и задублированного вывода (регрессия 1.2.8/1.2.9).
 #   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
 #           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
 #           save -> restart -> повторный тест (раньше port-fix и iface-up шли
@@ -62,7 +66,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.9"
+MENU_VERSION="1.2.10"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1479,32 +1483,15 @@ check_proxy_run() {
   echo ""
 }
 
-# Точка входа пункта [6]: после исправления порта или подъёма t2sN — полный повторный тест
+# Точка входа пункта [6] (v1.2.10): ОДИН проход.
+# Исправления (порт upstream / up туннеля / restart) применяются ДО тестов,
+# затем сразу гоняются тесты — без дублирующего блока «ПОВТОРНАЯ ПРОВЕРКА».
 check_proxy() {
   print_banner
   # Компактный вывод (v1.2.6); полный cmdline процесса — по флагу -v: ./menu-opera.sh 6 -v
   CHECK_PROXY_VERBOSE=0
   case "${CHECK_PROXY_ARG:-}" in -v|--verbose|v) CHECK_PROXY_VERBOSE=1 ;; esac
-  _cpr_attempt=1
-  while :; do
-    check_proxy_run
-    _need_retry=0
-    [ "${_fix_applied:-0}" = "1" ] && _need_retry=1
-    [ "${_up_iface_applied:-0}" = "1" ] && _need_retry=1
-    if [ "$_need_retry" = "1" ] && [ "$_cpr_attempt" -lt 2 ]; then
-      _cpr_attempt=$((_cpr_attempt + 1))
-      printf '%b────────────────────────────────────────────────%b\n' "$bold" "$reset"
-      if [ "${_up_iface_applied:-0}" = "1" ]; then
-        printf '%b  ⟳ ПОВТОРНАЯ ПРОВЕРКА после подъёма интерфейса %s%b\n' "$bold" "$T2S" "$reset"
-      else
-        printf '%b  ⟳ ПОВТОРНЫЙ ТЕСТ после исправления порта и перезапуска сервиса%b\n' "$bold" "$reset"
-      fi
-      printf '%b────────────────────────────────────────────────%b\n' "$bold" "$reset"
-      echo ""
-      continue
-    fi
-    break
-  done
+  check_proxy_run
 }
 
 # ---------------------------------------------------------------------------
