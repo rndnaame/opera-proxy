@@ -63,6 +63,12 @@
 #           localhost и IPv6 в скобках ([::1]:1080); пустые октеты IPv4 больше
 #           не считаются валидными; подсказка формата дополнена примером
 #           локального прокси 127.0.0.1:11001.
+#   1.2.15 — syslog-wrapper v5: логирование через FIFO + фоновый читатель
+#           (logger/tail) вместо конвейера "daemon | logger". Демон больше не
+#           стоит в пайпе — устранены ложные завершения "Server terminated with
+#           a reason: interrupt signal received" при stop/restart; остановка
+#           шлёт SIGTERM (graceful shutdown), читатель останавливается вместе
+#           с сервисом; при отсутствии logger — фолбэк tail -F в файл лога.
 #   1.2.14 — пункт [6]: проверка API_PROXY: если в cmdline запущенного процесса
 #           есть -api-proxy socks5://IP:PORT — строка «API : socks5://...» в шапке
 #           и дополнительный тест доступности внешнего SOCKS5 (итог N/5).
@@ -82,7 +88,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.14"
+MENU_VERSION="1.2.15"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1823,8 +1829,12 @@ init_has_logger() {
 write_syslog_init_wrapper() {
   cat > "$1" << 'WRAPEOF'
 #!/bin/sh
-### menu-opera syslog wrapper v4 (v1.2.3) ###
+### menu-opera syslog wrapper v5 (v1.2.15) ###
 # Управляет opera-proxy и шлёт весь вывод демона в системный журнал Keenetic.
+# Логирование реализовано через FIFO + фоновый читатель (logger/tail), а не
+# конвейер "daemon | logger": демон НЕ является частью пайпа, поэтому сигналы
+# (SIGTERM/SIGINT) доходят корректно и случайные "interrupt signal received"
+# при рестартах/остановках больше не возникают.
 # При stop соответствующий интерфейс Opera (t2sN) уходит в DOWN, при start — UP.
 # Отключение логирования: удалите строку LOG_TO_SYSLOG="yes" в /opt/etc/opera-proxy.conf
 # Возврат к стандартному скрипту: cp S99opera-proxy.bak.<ts> S99opera-proxy
@@ -1833,6 +1843,8 @@ CONF=/opt/etc/opera-proxy.conf
 PIDFILE=/opt/var/run/opera-proxy.pid
 NAME=opera-proxy
 DAEMON=/opt/sbin/opera-proxy
+FIFO=/opt/var/run/opera-proxy.log.fifo
+READER_PIDFILE=/opt/var/run/opera-proxy-logger.pid
 [ -x "$DAEMON" ] || DAEMON=$(command -v opera-proxy 2>/dev/null)
 
 load_conf() {
@@ -1892,16 +1904,61 @@ t2s_set_state() {
 t2s_up()   { t2s_set_state up; }
 t2s_down() { t2s_set_state down; }
 
+reader_running() {
+    [ -f "$READER_PIDFILE" ] || return 1
+    _rpid=$(cat "$READER_PIDFILE" 2>/dev/null)
+    [ -n "$_rpid" ] && kill -0 "$_rpid" 2>/dev/null || { rm -f "$READER_PIDFILE"; return 1; }
+    return 0
+}
+
+start_reader() {
+    # Фоновый читатель FIFO: строки из $FIFO уходят в syslog (BusyBox logger).
+    # busybox "logger -t NAME" читает stdin до EOF, поэтому оборачиваем его
+    # в цикл: при закрытии writer'ом читатель перезапускается и ждёт дальше.
+    # Если logger недоступен — фолбэк на tail -F в текстовый лог-файл.
+    reader_running && return 0
+    rm -f "$FIFO"
+    mkfifo "$FIFO" 2>/dev/null || { echo "$NAME: не удалось создать FIFO (syslog-логирование пропущено)"; return 1; }
+    if command -v logger >/dev/null 2>&1; then
+        ( while :; do
+              if [ -r "$FIFO" ]; then logger -t "$NAME" < "$FIFO"; fi
+              sleep 1
+          done ) </dev/null >/dev/null 2>&1 &
+    else
+        ( while :; do
+              if [ -r "$FIFO" ]; then tail -F "$FIFO" >> /opt/var/log/opera-proxy.log 2>/dev/null; fi
+              sleep 1
+          done ) </dev/null >/dev/null 2>&1 &
+    fi
+    echo $! > "$READER_PIDFILE"
+    sleep 1
+    return 0
+}
+
+stop_reader() {
+    if reader_running; then
+        kill "$(cat "$READER_PIDFILE")" 2>/dev/null
+        rm -f "$READER_PIDFILE"
+    fi
+    pkill -f "opera-proxy.log.fifo" 2>/dev/null
+    rm -f "$FIFO"
+}
+
 do_start() {
     is_running && { echo "$NAME уже запущен (pid $(cat $PIDFILE))"; return 0; }
     load_conf
-    if [ "$LOG_TO_SYSLOG" = "yes" ] && command -v logger >/dev/null 2>&1; then
-        # Обёртка-конвейер: stdout+stderr демона построчно уходят в syslog.
-        # ВАЖНО: exec 2>&1 внутри под-шелла не работает в busybox ash/dash
-        # (stderr наследует /dev/null внешнего редиректа) — поэтому 2>&1
-        # ставится на сам конвейер до запуска фоновой группы.
-        ( "$DAEMON" $OPTIONS 2>&1 | logger -t "$NAME" ) </dev/null >/dev/null 2>&1 &
+    if [ "$LOG_TO_SYSLOG" = "yes" ]; then
+        # Демон пишется в FIFO; читатель FIFO → syslog живёт отдельно от демона.
+        # Сам демон НЕ стоит в конвейере — сигналы stop/restart доходят чисто
+        # (исправление "Server terminated ... interrupt signal received").
+        start_reader
+        if [ -p "$FIFO" ]; then
+            ("$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1 &)
+        else
+            ("$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &)
+        fi
     else
+        stop_reader
         ("$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &)
     fi
     _i=0
@@ -1922,12 +1979,15 @@ do_start() {
 
 do_stop() {
     if is_running; then
+        # Корректный graceful shutdown: SIGTERM (Go-демон перехватывает его и
+        # пишет "Shutting down..."), затем при необходимости SIGKILL.
         kill "$(cat "$PIDFILE")" 2>/dev/null
         sleep 1
         is_running && kill -9 "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
     fi
     pidof "$NAME" >/dev/null 2>&1 && pkill -x "$NAME" 2>/dev/null
+    stop_reader
     t2s_down
     echo "$NAME остановлен"
 }
