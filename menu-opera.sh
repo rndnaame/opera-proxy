@@ -44,6 +44,10 @@
 #   1.2.7 — пункт [6]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
 #           полный cmdline — только по флагу запуска: ./menu-opera.sh 6 -v;
 #           перенос cmdline без fold (нет в Entware/BusyBox) — awk, фолбэк sed
+#   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
+#           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
+#           save -> restart -> повторный тест (раньше port-fix и iface-up шли
+#           двумя отдельными проходами с промежуточным прогоном всех тестов)
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -51,7 +55,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.7"
+MENU_VERSION="1.2.8"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1296,16 +1300,49 @@ check_proxy_run() {
   fi
   echo ""
 
-  # Сверка порта теста с портом t2sN: при расхождении — предложить исправить
+  # v1.2.8: все неисправности (расхождение порта + DOWN t2s) собираются до тестов
+  # и чинятся за ОДИН проход: upstream -> up -> save -> restart -> повторный тест
   _fix_applied=0
-  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then
-    printf '%b⚠ Порт SOCKS (%s) ≠ upstream-порт %s (%s)%b\n' \
-      "$yellow" "$_use_port" "$T2S" "$_t2s_port" "$reset"
-    if [ "$(yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_use_port}, перезапустить сервис и повторить тест? [y/N]: " "n")" = "1" ]; then
-      if command -v ndmc >/dev/null 2>&1; then
+  _up_iface_applied=0
+  _port_mismatch=0
+  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then _port_mismatch=1; fi
+
+  if [ "$_port_mismatch" = "1" ] || [ "$_up" != "1" ]; then
+    _ndmc_ok=0
+    command -v ndmc >/dev/null 2>&1 && _ndmc_ok=1
+    _q=""
+    if [ "$_port_mismatch" = "1" ] && [ "$_up" != "1" ]; then
+      printf '%b⚠ Порт SOCKS (%s) ≠ upstream-порт %s (%s)%b\n' \
+        "$yellow" "$_use_port" "$T2S" "$_t2s_port" "$reset"
+      printf '%b⚠ Интерфейс %s DOWN%b\n' "$yellow" "$T2S" "$reset"
+      _q="   Исправить upstream $IFACE на 127.0.0.1:${_use_port}, поднять туннель ($IFACE up), перезапустить сервис и повторить тест? [Y/n]: "
+    elif [ "$_port_mismatch" = "1" ]; then
+      printf '%b⚠ Порт SOCKS (%s) ≠ upstream-порт %s (%s)%b\n' \
+        "$yellow" "$_use_port" "$T2S" "$_t2s_port" "$reset"
+      _q="   Исправить upstream $IFACE на 127.0.0.1:${_use_port}, перезапустить сервис и повторить тест? [Y/n]: "
+    else
+      printf '%b⚠ Интерфейс %s DOWN — трафик роутера через $IFACE не пойдёт, пока туннель опущен%b\n' \
+        "$yellow" "$T2S" "$reset"
+      _q="   Поднять туннель ($IFACE up) и повторить проверку? [Y/n]: "
+    fi
+    if [ "$_ndmc_ok" = "0" ]; then
+      echo "   ⚠ ndmc не найден — исправьте вручную:"
+      [ "$_port_mismatch" = "1" ] && echo "     interface $IFACE proxy upstream 127.0.0.1 ${_use_port}"
+      [ "$_up" != "1" ] && echo "     interface $IFACE up"
+    elif [ "$(yes_no "$_q" "y")" = "1" ]; then
+      if [ "$_port_mismatch" = "1" ]; then
         echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_use_port} ..."
         ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_use_port}" 2>/dev/null || true
-        ndmc -c "system configuration save" 2>/dev/null || true
+      fi
+      if [ "$_up" != "1" ]; then
+        _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
+        [ -z "$_n" ] && _n=0
+        echo "→ ndmc: interface Proxy$_n up ..."
+        ndmc -c "interface Proxy$_n up" 2>/dev/null || true
+        _up_iface_applied=1
+      fi
+      ndmc -c "system configuration save" 2>/dev/null || true
+      if [ "$_port_mismatch" = "1" ]; then
         echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
         /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
           || /opt/etc/init.d/"$(ls /opt/etc/init.d/ 2>/dev/null | grep -i opera-proxy | head -1)" restart 2>/dev/null \
@@ -1313,10 +1350,11 @@ check_proxy_run() {
         sleep 3
         _fix_applied=1
       else
-        echo "   ⚠ ndmc не найден — исправьте вручную: interface $IFACE proxy upstream 127.0.0.1 ${_use_port}"
+        sleep 2
       fi
+      echo "→ Повторная проверка..."
     else
-      echo "   Пропущено (тест продолжается через SOCKS5 :${_use_port})."
+      echo "   Пропущено (тест продолжается как есть)."
     fi
     echo ""
   fi
@@ -1383,7 +1421,6 @@ check_proxy_run() {
 
   # Итоговая сводка
   echo ""
-  _up_iface_applied=0
   if [ "$_ok_count" -ge 3 ]; then
     printf "  %b✓ Прокси работает%b  (%s/4)\n" "$green" "$reset" "$_ok_count"
   elif [ "$_ok_count" -ge 1 ]; then
@@ -1392,35 +1429,6 @@ check_proxy_run() {
     printf "  %b✗ Прокси не отвечает%b  (0/4)  (Fix — п.4, перезапуск — п.5)\n" "$red" "$reset"
   fi
 
-  # v1.2.5: хоть одна проверка прошла, а t2sN DOWN — предложить поднять интерфейс
-  # (SOCKS работает, но трафик роутера через $IFACE не пойдёт, пока туннель опущен)
-  if [ "$_ok_count" -ge 1 ] && [ "$_up" != "1" ]; then
-    echo ""
-    printf '%b⚠ Прокси отвечает через SOCKS5, но интерфейс %s DOWN.%b\n' \
-      "$yellow" "$T2S" "$reset"
-    if [ "$_t2s_exists" = "1" ]; then
-      echo "   Трафик роутера через $IFACE не пойдёт, пока туннель опущен."
-    else
-      echo "   Интерфейс $T2S не найден (возможен пересоздание интерфейса Opera)."
-    fi
-    if command -v ndmc >/dev/null 2>&1; then
-      if [ "$(yes_no "   Поднять $T2S ($IFACE up) и повторить проверку? [Y/n]: " "y")" = "1" ]; then
-        _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
-        [ -z "$_n" ] && _n=0
-        echo "→ ndmc: interface Proxy$_n up ..."
-        ndmc -c "interface Proxy$_n up" 2>/dev/null || true
-        ndmc -c "system configuration save" 2>/dev/null || true
-        sleep 2
-        _up_iface_applied=1
-        echo "→ Повторная проверка..."
-        echo ""
-      else
-        echo "   Пропущено."
-      fi
-    else
-      echo "   ⚠ ndmc не найден — поднимите вручную: interface $IFACE up"
-    fi
-  fi
   echo ""
 }
 
