@@ -44,6 +44,13 @@
 #   1.2.7 — пункт [6]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
 #           полный cmdline — только по флагу запуска: ./menu-opera.sh 6 -v;
 #           перенос cmdline без fold (нет в Entware/BusyBox) — awk, фолбэк sed
+#   1.2.9 — исправление 1.2.8: в пункте [6] тесты выполнялись СРАЗУ после «ndmc up»
+#           и restart, до фактического поднятия туннеля — первый проход давал 0/4
+#           и лишний повторный вывод. Теперь: (1) порядок «up → save → restart»;
+#           (2) ожидание реального UP интерфейса (до ~15 с); (3) ожидание старта
+#           прослушивания SOCKS-порта; (4) если после исправлений тесты не прошли —
+#           результат показывается один раз (без дублирующего блока), при UP-туннеле
+#           даётся подсказка обождать и повторить п.6.
 #   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
 #           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
 #           save -> restart -> повторный тест (раньше port-fix и iface-up шли
@@ -55,7 +62,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.8"
+MENU_VERSION="1.2.9"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1334,9 +1341,10 @@ check_proxy_run() {
         echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_use_port} ..."
         ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_use_port}" 2>/dev/null || true
       fi
+      # v1.2.9: сначала up, затем сохранение конфига и только потом restart сервиса
+      _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
+      [ -z "$_n" ] && _n=0
       if [ "$_up" != "1" ]; then
-        _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
-        [ -z "$_n" ] && _n=0
         echo "→ ndmc: interface Proxy$_n up ..."
         ndmc -c "interface Proxy$_n up" 2>/dev/null || true
         _up_iface_applied=1
@@ -1347,11 +1355,39 @@ check_proxy_run() {
         /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
           || /opt/etc/init.d/"$(ls /opt/etc/init.d/ 2>/dev/null | grep -i opera-proxy | head -1)" restart 2>/dev/null \
           || echo "   ⚠ Не удалось перезапустить сервис"
-        sleep 3
-        _fix_applied=1
-      else
-        sleep 2
       fi
+      # v1.2.9: ждём фактического поднятия туннеля (до ~15 с) — раньше тесты шли
+      # сразу после «up» и давали ложные 0/4 на первом проходе
+      if [ "$_up_iface_applied" = "1" ]; then
+        printf '→ Ожидание %s UP' "$T2S"
+        _w=0
+        while [ "$_w" -lt 15 ]; do
+          sleep 1
+          if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then break; fi
+          ifconfig "$T2S" 2>/dev/null | grep -q "UP" && break
+          printf '.'
+          _w=$((_w + 1))
+        done
+        echo ""
+      fi
+      # ждём, пока сервис после restart снова слушает SOCKS-порт (до ~8 с)
+      if [ "$_port_mismatch" = "1" ]; then
+        _w=0
+        while [ "$_w" -lt 8 ]; do
+          _p=0
+          if command -v netstat >/dev/null 2>&1; then
+            netstat -ltn 2>/dev/null | grep -qE "[:.]${_use_port}[[:space:]]" && _p=1
+          elif command -v ss >/dev/null 2>&1; then
+            ss -ltn 2>/dev/null | grep -qE "[:.]${_use_port}[[:space:]]" && _p=1
+          else
+            nc -z -w 2 "$_socks_host" "$_use_port" 2>/dev/null && _p=1
+          fi
+          [ "$_p" = "1" ] && break
+          sleep 1
+          _w=$((_w + 1))
+        done
+      fi
+      _fix_applied=1
       echo "→ Повторная проверка..."
     else
       echo "   Пропущено (тест продолжается как есть)."
@@ -1427,6 +1463,17 @@ check_proxy_run() {
     printf "  %b! Частично%b  (%s/4) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
   else
     printf "  %b✗ Прокси не отвечает%b  (0/4)  (Fix — п.4, перезапуск — п.5)\n" "$red" "$reset"
+    # v1.2.9: если тесты прогнаны ПОСЛЕ применения исправлений и всё равно 0/4 —
+    # повторный полный прогон бессмысленен (дублирует вывод). Даём подсказку.
+    if [ "${_fix_applied:-0}" = "1" ] || [ "${_up_iface_applied:-0}" = "1" ]; then
+      _fix_applied=0; _up_iface_applied=0   # без дублирующего блока «ПОВТОРНАЯ ПРОВЕРКА»
+      if [ "$_up" != "1" ]; then
+        echo "     Туннель $T2S мог ещё не подняться — обождите ~10 с и повторите п.6."
+      else
+        echo "     Исправления применены, но тесты не прошли — повторите п.6 позже"
+        echo "     или выполните Fix (п.4)."
+      fi
+    fi
   fi
 
   echo ""
