@@ -69,6 +69,10 @@
 #           a reason: interrupt signal received" при stop/restart; остановка
 #           шлёт SIGTERM (graceful shutdown), читатель останавливается вместе
 #           с сервисом; при отсутствии logger — фолбэк tail -F в файл лога.
+#   1.2.16 — запуск демона через setsid/nohup (перехват SIGHUP): случайные
+#           "Server terminated with a reason: interrupt signal received" больше
+#           не возникают, даже если терминал SSH закрывается или shell рассылает
+#           сигналы группе процессов; stop по-прежнему шлёт SIGTERM (graceful).
 #   1.2.14 — пункт [6]: проверка API_PROXY: если в cmdline запущенного процесса
 #           есть -api-proxy socks5://IP:PORT — строка «API : socks5://...» в шапке
 #           и дополнительный тест доступности внешнего SOCKS5 (итог N/5).
@@ -88,7 +92,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.15"
+MENU_VERSION="1.2.16"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1829,12 +1833,15 @@ init_has_logger() {
 write_syslog_init_wrapper() {
   cat > "$1" << 'WRAPEOF'
 #!/bin/sh
-### menu-opera syslog wrapper v5 (v1.2.15) ###
+### menu-opera syslog wrapper v6 (v1.2.16) ###
 # Управляет opera-proxy и шлёт весь вывод демона в системный журнал Keenetic.
 # Логирование реализовано через FIFO + фоновый читатель (logger/tail), а не
 # конвейер "daemon | logger": демон НЕ является частью пайпа, поэтому сигналы
 # (SIGTERM/SIGINT) доходят корректно и случайные "interrupt signal received"
 # при рестартах/остановках больше не возникают.
+# v6: демон запускается в собственной сессии (setsid; фолбэк — nohup+trap),
+#     поэтому закрытие SSH-терминала / рассылка SIGHUP группе процессов shell
+#     его больше не убивает.
 # При stop соответствующий интерфейс Opera (t2sN) уходит в DOWN, при start — UP.
 # Отключение логирования: удалите строку LOG_TO_SYSLOG="yes" в /opt/etc/opera-proxy.conf
 # Возврат к стандартному скрипту: cp S99opera-proxy.bak.<ts> S99opera-proxy
@@ -1944,6 +1951,20 @@ stop_reader() {
     rm -f "$FIFO"
 }
 
+daemon_cmd() {
+    # $1 = путь к демону, $2... = аргументы.
+    # Запуск в собственной сессии (setsid) — защита от SIGHUP при закрытии
+    # SSH-терминала и от рассылки сигналов группе процессов shell.
+    _d="$1"; shift
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$_d" "$@" &
+    else
+        trap '' HUP
+        "$_d" "$@" &
+    fi
+    echo $! > "$PIDFILE"
+}
+
 do_start() {
     is_running && { echo "$NAME уже запущен (pid $(cat $PIDFILE))"; return 0; }
     load_conf
@@ -1953,26 +1974,26 @@ do_start() {
         # (исправление "Server terminated ... interrupt signal received").
         start_reader
         if [ -p "$FIFO" ]; then
-            ("$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1 &)
+            daemon_cmd "$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1
         else
-            ("$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &)
+            daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1
         fi
     else
         stop_reader
-        ("$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &)
+        daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1
     fi
     _i=0
     while [ $_i -lt 5 ]; do
-        _pid=$(pidof "$NAME" 2>/dev/null | awk '{print $1}')
-        if [ -n "$_pid" ]; then
-            echo "$_pid" > "$PIDFILE"
+        sleep 1
+        _pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
             echo "$NAME запущен (pid $_pid)"
             t2s_up
             return 0
         fi
-        sleep 1
         _i=$((_i + 1))
     done
+    rm -f "$PIDFILE"
     echo "ОШИБКА: $NAME не запустился"
     return 1
 }
