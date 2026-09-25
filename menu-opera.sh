@@ -59,6 +59,10 @@
 #           (IP:PORT с валидацией и проверкой живости), 2) подбор рабочего socks5
 #           из публичных списков, 3) отключить. API_PROXY хранится отдельной
 #           переменной в конфиге; rebuild_options/Fix учитывают её.
+#   1.2.12 — пункт [7][8]: исправлена валидация HOST:PORT — принимаются
+#           localhost и IPv6 в скобках ([::1]:1080); пустые октеты IPv4 больше
+#           не считаются валидными; подсказка формата дополнена примером
+#           локального прокси 127.0.0.1:11001.
 #   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
 #           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
 #           save -> restart -> повторный тест (раньше port-fix и iface-up шли
@@ -70,7 +74,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.11"
+MENU_VERSION="1.2.12"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1629,27 +1633,43 @@ conf_set_api_proxy() {
 }
 
 # Валидация "IP:PORT"
+# Валидация HOST:PORT для апстрима (IP или localhost; IPv4 и IPv6 в скобках)
 valid_ip_port() {
   case "$1" in
-    *[!0-9.:]*|"") return 1 ;;
+    ""|*[[:space:]]*) return 1 ;;
+  esac
+  # IPv6 в скобках: [::1]:1080 / [fd00::1]:18080
+  case "$1" in
+    \[*\]:*)
+      _ip=${1%%\]:*}; _ip="${_ip#\[}"; _pt=${1##*\]:}
+      case "$_ip" in *[!0-9a-fA-F:.]*) return 1 ;; esac
+      case "$_pt" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$_pt" -ge 1 ] 2>/dev/null && [ "$_pt" -le 65535 ] 2>/dev/null || return 1
+      return 0 ;;
   esac
   case "$1" in
     *:*) : ;;
     *) return 1 ;;
   esac
   _ip=${1%:*}; _pt=${1##*:}
-  case "$_ip" in
-    *[!0-9]*|"") return 1 ;;
-  esac
   case "$_pt" in
     ''|*[!0-9]*) return 1 ;;
   esac
   [ "$_pt" -ge 1 ] 2>/dev/null && [ "$_pt" -le 65535 ] 2>/dev/null || return 1
+  case "$_ip" in
+    localhost) return 0 ;;
+  esac
+  case "$_ip" in
+    *[!0-9.]*|"") return 1 ;;
+  esac
   _octets=$(printf '%s' "$_ip" | awk -F. '{print NF}')
   [ "$_octets" = "4" ] || return 1
   _IFS=$IFS; IFS=.
   for _o in $_ip; do
-    [ "$_o" -le 255 ] 2>/dev/null || { IFS=$_IFS; return 1; }
+    case "$_o" in
+      ''|*[!0-9]*) IFS=$_IFS; return 1 ;;
+    esac
+    [ "$_o" -le 255 ] || { IFS=$_IFS; return 1; }
   done
   IFS=$_IFS
   return 0
@@ -2153,7 +2173,7 @@ config_menu() {
             if [ -z "$_p" ]; then
               echo "   Отменено (пустой ввод)."
             elif ! valid_ip_port "$_p"; then
-              printf '%b⚠ Неверный формат. Пример: 72.195.34.59:4145%b\n' "$red" "$reset"
+              printf '%b⚠ Неверный формат. Пример: 72.195.34.59:4145 или локальный 127.0.0.1:11001%b\n' "$red" "$reset"
             else
               echo "→ Проверка socks5://$_p ..."
               if socks5_alive "$_p"; then
