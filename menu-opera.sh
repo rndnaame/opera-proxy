@@ -28,6 +28,11 @@
 #   1.2.2 — syslog-wrapper: при остановке сервиса t2sN интерфейс Opera уходит в DOWN,
 #           при запуске — поднимается в UP (интерфейс ищется по upstream-порту из
 #           OPTIONS, фолбэк — по description Opera; через ndmc + config save)
+#   1.2.3 — исправление 1.2.2: пункт [5] вызывал stop стандартного init-скрипта
+#           (rc.func), который ничего не знает о t2s — интерфейс оставался UP.
+#           Теперь п.[5] сам опускает/поднимает t2sN (по порту из конфига, как в п.[6]),
+#           а wrapper-скрипт ищет интерфейс ещё и по BIND_ADDR/BIND_PORT из конфига
+#           (upstream мог быть настроен на порт, отличный от -bind-address демона)
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -35,7 +40,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.2"
+MENU_VERSION="1.2.3"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1079,6 +1084,38 @@ CRON
 # ---------------------------------------------------------------------------
 # [5] Остановить / Запустить сервис
 # ---------------------------------------------------------------------------
+# Управление состоянием t2s-интерфейса Opera из пунктов меню (v1.2.3):
+# интерфейс ищется по upstream-порту (как в п.[6]), фолбэк — description Opera.
+menu_iface_num_by_port() {
+  # $1 = порт; печатает N для ProxyN, чей upstream = 127.0.0.1:<порт>
+  _p="$1"
+  command -v ndmc >/dev/null 2>&1 || return 0
+  ndmc -c "show running-config" 2>/dev/null | awk -v p="$_p" '
+    /^interface Proxy[0-9]+/ { cur=$2 }
+    /proxy upstream 127\.0\.0\.1[ \t]+/ {
+      n = $NF
+      gsub(/[^0-9]/, "", n)
+      if (n == p && cur != "") { sub(/^Proxy/, "", cur); print cur; exit }
+    }'
+}
+
+menu_t2s_set_state() {
+  # $1 = up|down
+  _st="$1"
+  command -v ndmc >/dev/null 2>&1 || return 0
+  _bp=$(conf_get BIND_PORT)
+  [ -z "$_bp" ] && _bp="$BIND_PORT_DEFAULT"
+  _n=$(menu_iface_num_by_port "$_bp")
+  if [ -z "$_n" ]; then
+    find_opera_iface 2>/dev/null
+    _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
+    [ -z "$_n" ] && _n=0
+  fi
+  ndmc -c "interface Proxy$_n $_st" 2>/dev/null
+  ndmc -c "system configuration save" 2>/dev/null
+  echo "t2s$_n → $_st"
+}
+
 toggle_service() {
   print_banner
   printf '%b\n' "${bold}[5] Управление сервисом opera-proxy${reset}"
@@ -1097,7 +1134,9 @@ toggle_service() {
     if [ "$(yes_no "Остановить сервис? [Y/n]: " "y")" = "1" ]; then
       /opt/etc/init.d/S99opera-proxy stop
       killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
-      echo "✅ Сервис остановлен"
+      # v1.2.3: опускаем t2s-интерфейс Opera (стандартный rc.func-скрипт сам не умеет)
+      _t2s_msg=$(menu_t2s_set_state down)
+      echo "✅ Сервис остановлен${_t2s_msg:+, $_t2s_msg}"
     else
       echo "Отменено."
     fi
@@ -1108,7 +1147,9 @@ toggle_service() {
       /opt/etc/init.d/S99opera-proxy start
       sleep 2
       if pgrep -f "[o]pera-proxy" >/dev/null 2>&1; then
-        echo "✅ Сервис запущен"
+        # v1.2.3: поднимаем t2s-интерфейс Opera (если init-скрипт стандартный/rc.func)
+        _t2s_msg=$(menu_t2s_set_state up)
+        echo "✅ Сервис запущен${_t2s_msg:+, $_t2s_msg}"
       else
         echo "⚠ Команда start выполнена, но процесс не обнаружен"
       fi
@@ -1521,11 +1562,15 @@ iface_num_by_port() {
 }
 
 opera_iface_num() {
-    # Ищем интерфейс по порту из OPTIONS (-bind-address ...:<порт>);
-    # фолбэк — интерфейс с description Opera.
-    _bp=$(echo "$OPTIONS" | sed -n 's/.*-bind-address[ \t][ \t]*[^: ]*:\([0-9][0-9]*\).*/\1/p')
+    # Ищем интерфейс по порту: сначала BIND_ADDR/BIND_PORT из конфига (v1.2.3 —
+    # upstream ProxyN настраивается именно по BIND_PORT), затем порт из OPTIONS
+    # (-bind-address ...:<порт>); фолбэк — интерфейс с description Opera.
     _n=""
-    [ -n "$_bp" ] && _n=$(iface_num_by_port "$_bp")
+    [ -n "$BIND_PORT" ] && _n=$(iface_num_by_port "$BIND_PORT")
+    if [ -z "$_n" ]; then
+        _bp=$(echo "$OPTIONS" | sed -n 's/.*-bind-address[ \t][ \t]*[^: ]*:\([0-9][0-9]*\).*/\1/p')
+        [ -n "$_bp" ] && _n=$(iface_num_by_port "$_bp")
+    fi
     if [ -z "$_n" ]; then
         _n=$(ndmc -c "show running-config" 2>/dev/null | awk '
             /^interface Proxy[0-9]+/ { cur=$2 }
