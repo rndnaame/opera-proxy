@@ -33,6 +33,9 @@
 #           Теперь п.[5] сам опускает/поднимает t2sN (по порту из конфига, как в п.[6]),
 #           а wrapper-скрипт ищет интерфейс ещё и по BIND_ADDR/BIND_PORT из конфига
 #           (upstream мог быть настроен на порт, отличный от -bind-address демона)
+#   1.2.4 — исправлены уровни VERBOSITY по справке opera-proxy:
+#           10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent (без вывода);
+#           подменю выбора расширено до [1]-[6], добавлены описания 50/60
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -40,7 +43,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.3"
+MENU_VERSION="1.2.4"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1447,7 +1450,7 @@ BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
 # Выбор сервера: random (случайный) или fastest (быстрый)
 SERVER_SELECT="random"
 
-# Уровень логов: 10=debug, 20=info, 30=warn, 40=error
+# Уровень логов: 10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent
 VERBOSITY="30"
 
 # Логи opera-proxy в системный журнал Keenetic (Мониторинг → Журнал): yes/no
@@ -1724,7 +1727,7 @@ config_menu() {
     printf "  %-14s: %b%s%b\n" "FAKE_SNI" "$bold" "$_sni" "$reset"
     printf "  %-14s: %b%s%b\n" "BOOTSTRAP_DNS" "$bold" "$_doh" "$reset"
     printf "  %-14s: %b%s%b   (random | fastest)\n" "SERVER_SELECT" "$bold" "$_srvsel" "$reset"
-    printf "  %-14s: %b%s%b   (10|20|30|40)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
+    printf "  %-14s: %b%s%b   (10|20|30|40|50|60)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
     _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
     [ -n "$_api" ] && printf "  %-14s: %b%s%b\n" "API_PROXY" "$yellow" "$_api" "$reset"
     echo ""
@@ -1848,10 +1851,12 @@ config_menu() {
       7)
         echo ""
         echo "Выберите уровень логирования (VERBOSITY):"
-        echo "  [1] 10 — debug (подробная отладка)"
-        echo "  [2] 20 — info (информационный)"
-        echo "  [3] 30 — warn (предупреждения; по умолчанию)"
-        echo "  [4] 40 — error (только ошибки)"
+        echo "  [1] 10 — debug     (подробная отладка)"
+        echo "  [2] 20 — info      (информационный; по умолчанию в opera-proxy)"
+        echo "  [3] 30 — warn      (предупреждения и выше)"
+        echo "  [4] 40 — error     (только ошибки)"
+        echo "  [5] 50 — critical  (только критические)"
+        echo "  [6] 60 — silent    (полное отсутствие вывода)"
         echo "  [0] Отмена"
         _v=$(ask "Ваш выбор [текущий: $_verb]: " "")
         case "$_v" in
@@ -1859,11 +1864,13 @@ config_menu() {
           2|20) _vu="20" ;;
           3|30) _vu="30" ;;
           4|40) _vu="40" ;;
+          5|50) _vu="50" ;;
+          6|60) _vu="60" ;;
           0) printf '   Отменено.\n'; sleep 1; continue ;;
-          *) printf '%b⚠ Неверный выбор: %s (нужно 1-4)%b\n' "$red" "$_v" "$reset"; sleep 1; continue ;;
+          *) printf '%b⚠ Неверный выбор: %s (нужно 1-6)%b\n' "$red" "$_v" "$reset"; sleep 1; continue ;;
         esac
         conf_set VERBOSITY "$_vu"; rebuild_options
-        printf '%b✓ VERBOSITY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in 10) echo debug;; 20) echo info;; 30) echo warn;; 40) echo error;; esac)" "$reset"
+        printf '%b✓ VERBOSITY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in 10) echo debug;; 20) echo info;; 30) echo warn;; 40) echo error;; 50) echo critical;; 60) echo silent;; esac)" "$reset"
         # Логи opera-proxy пишутся в stderr; чтобы они попадали в журнал Keenetic,
         # нужен logger. Проверяем init-скрипт и при необходимости включаем обёртку.
         if ! init_has_logger; then
