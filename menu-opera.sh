@@ -41,6 +41,9 @@
 #   1.2.6 — пункт [6]: компактный вывод — убраны блоки «Параметры opera-proxy» и
 #           разделители секций; статусы в одну таблице; IP-сервисы показывают
 #           IP прямо в строке теста; полный cmdline процесса — по флагу -v
+#   1.2.7 — пункт [6]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
+#           полный cmdline — только по флагу запуска: ./menu-opera.sh 6 -v;
+#           перенос cmdline без fold (нет в Entware/BusyBox) — awk, фолбэк sed
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -48,7 +51,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.6"
+MENU_VERSION="1.2.7"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1274,9 +1277,22 @@ check_proxy_run() {
     printf "   PID    : %s\n" "$_pid"
   fi
   if [ "$CHECK_PROXY_VERBOSE" = "1" ] && [ -n "$_cmdline" ]; then
-    # подробный режим: полный cmdline процесса (перенос по словам)
+    # подробный режим: полный cmdline процесса
+    # перенос по словам без fold (в Entware/BusyBox его может не быть): awk, фолбэк sed
     printf '   Cmdline:\n'
-    printf '%s\n' "$_cmdline" | fold -s -w 48 | sed 's/^/     /'
+    if command -v awk >/dev/null 2>&1; then
+      printf '%s\n' "$_cmdline" | awk '{
+        line=""; max=60;
+        for (i=1;i<=NF;i++) {
+          w=length($i) + (line=="" ? 0 : 1);
+          if (length(line)+w > max && line != "") { print "     " line; line=$i; }
+          else { line = (line=="" ? $i : line " " $i); }
+        }
+        if (line != "") print "     " line;
+      }'
+    else
+      printf '%s\n' "$_cmdline" | sed -e 's/\(.\{60\}\) /\1\n/g' -e 's/^/     /'
+    fi
   fi
   echo ""
 
@@ -1411,12 +1427,9 @@ check_proxy_run() {
 # Точка входа пункта [6]: после исправления порта или подъёма t2sN — полный повторный тест
 check_proxy() {
   print_banner
-  # Компактный вывод (v1.2.6); флаг v включает показ полного cmdline процесса
+  # Компактный вывод (v1.2.6); полный cmdline процесса — по флагу -v: ./menu-opera.sh 6 -v
   CHECK_PROXY_VERBOSE=0
-  printf '   Подробный вывод (cmdline процесса)? [y/N]: '
-  read _cpv_ans || true
-  case "$_cpv_ans" in y|Y|д|Д) CHECK_PROXY_VERBOSE=1 ;; esac
-  echo ""
+  case "${CHECK_PROXY_ARG:-}" in -v|--verbose|v) CHECK_PROXY_VERBOSE=1 ;; esac
   _cpr_attempt=1
   while :; do
     check_proxy_run
@@ -2213,9 +2226,20 @@ run_menu() {
 # main
 # ---------------------------------------------------------------------------
 main() {
+  # Аргументы: ./menu-opera.sh [6 [-v]] — сразу запустить проверку прокси; -v = с полным cmdline
+  for _a in "$@"; do
+    case "$_a" in
+      6) RUN_ITEM_6=1 ;;
+      -v|--verbose|v) CHECK_PROXY_ARG="$_a" ;;
+    esac
+  done
   # Если stdin — труба (curl|sh), перенаправляем на /dev/tty для меню
   if [ -r /dev/tty ]; then
     exec </dev/tty >/dev/tty 2>/dev/tty
+  fi
+  if [ "${RUN_ITEM_6:-0}" = "1" ]; then
+    check_proxy
+    ask "Нажмите Enter для возврата в меню... " ""
   fi
   run_menu
 }
