@@ -9,13 +9,15 @@
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
 #
 # История версий:
+#   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
+
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
 #   1.1.2 — пункт [6]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.4"
+MENU_VERSION="1.1.5"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1335,6 +1337,25 @@ conf_set() {
   ' "$OP_CONF_FILE" > "$_tmpc" 2>/dev/null && mv "$_tmpc" "$OP_CONF_FILE" || rm -f "$_tmpc"
 }
 
+# Пересборка OPTIONS из текущих параметров конфига (сохраняя -api-proxy).
+# Вызывается автоматически после каждого изменения параметра.
+rebuild_options() {
+  local r_country r_bindaddr r_bindport r_obf r_sni r_doh r_srvsel r_verb r_opts r_api
+  r_country=$(conf_get COUNTRY);      [ -z "$r_country" ] && r_country="EU"
+  r_bindaddr=$(conf_get BIND_ADDR);   [ -z "$r_bindaddr" ] && r_bindaddr="0.0.0.0"
+  r_bindport=$(conf_get BIND_PORT);   [ -z "$r_bindport" ] && r_bindport="1080"
+  r_obf=$(conf_get OBFUSCATE);        [ -z "$r_obf" ] && r_obf="yes"
+  r_sni=$(conf_get FAKE_SNI)
+  r_doh=$(conf_get BOOTSTRAP_DNS);    [ -z "$r_doh" ] && r_doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+  r_srvsel=$(conf_get SERVER_SELECT); [ -z "$r_srvsel" ] && r_srvsel="random"
+  r_verb=$(conf_get VERBOSITY);       [ -z "$r_verb" ] && r_verb="30"
+  r_opts="-socks-mode -country $r_country -bind-address ${r_bindaddr}:${r_bindport} -server-selection $r_srvsel -verbosity $r_verb -bootstrap-dns $r_doh"
+  [ "$r_obf" = "yes" ] && [ -n "$r_sni" ] && r_opts="$r_opts -fake-SNI $r_sni"
+  r_api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
+  [ -n "$r_api" ] && r_opts="$r_opts $r_api"
+  conf_set OPTIONS "$r_opts"
+}
+
 config_menu() {
   print_banner
   printf '%b\n' "${bold}[7] Настройка конфига${reset}"
@@ -1380,50 +1401,51 @@ config_menu() {
     echo ""
     printf '%b\n' "${light_blue}──────────────────────────────────────${reset}"
     echo ""
-    echo "  [a] Изменить COUNTRY (регион)"
-    echo "  [b] Изменить BIND_ADDR (адрес)"
-    echo "  [c] Изменить BIND_PORT (порт)"
-    echo "  [d] Изменить OBFUSCATE + FAKE_SNI"
-    echo "  [e] Изменить BOOTSTRAP_DNS"
-    echo "  [f] Изменить SERVER_SELECT"
-    echo "  [g] Изменить VERBOSITY"
-    echo "  [r] Пересобрать OPTIONS из параметров"
+    echo "  [1] Изменить COUNTRY (регион)"
+    echo "  [2] Изменить BIND_ADDR (адрес)"
+    echo "  [3] Изменить BIND_PORT (порт)"
+    echo "  [4] Изменить OBFUSCATE + FAKE_SNI"
+    echo "  [5] Изменить BOOTSTRAP_DNS"
+    echo "  [6] Изменить SERVER_SELECT"
+    echo "  [7] Изменить VERBOSITY"
     echo "  [l] Показать конфиг целиком"
     echo "  [s] Сохранить + перезапустить сервис"
     echo "  [x] Сбросить к конфигу по умолчанию"
     echo "  [0] Выход из настройки"
     echo ""
+    printf '%b\n' "${light_blue}OPTIONS пересобирается автоматически при каждом изменении${reset}"
+    echo ""
 
-    _cc=$(ask "Выбор [a b c d e f g r l s x 0]: " "0")
+    _cc=$(ask "Выбор [1-7 / l / s / x / 0]: " "0")
     case "$_cc" in
-      a|A)
+      1)
         _v=$(ask "Регион EU/AS/AM [$_country]: " "$_country")
         _vu=$(printf '%s' "$_v" | tr 'a-z' 'A-Z')
         case "$_vu" in
-          EU|AS|AM) conf_set COUNTRY "$_vu"; printf '%b✓ COUNTRY = %s%b\n' "$green" "$_vu" "$reset" ;;
+          EU|AS|AM) conf_set COUNTRY "$_vu"; rebuild_options; printf '%b✓ COUNTRY = %s%b\n' "$green" "$_vu" "$reset" ;;
           *) printf '%b⚠ Неверное значение: %s (нужно EU, AS или AM)%b\n' "$red" "$_v" "$reset" ;;
         esac
         sleep 1
         ;;
-      b)
+      2)
         _v=$(ask "BIND_ADDR [$_bindaddr] (127.0.0.1 — только роутер, 0.0.0.0 — вся сеть): " "$_bindaddr")
         case "$_v" in
           *[!0-9.]*|"") printf '%b⚠ Похоже, это не IPv4-адрес%b\n' "$red" "$reset" ;;
-          *) conf_set BIND_ADDR "$_v"; printf '%b✓ BIND_ADDR = %s%b\n' "$green" "$_v" "$reset" ;;
+          *) conf_set BIND_ADDR "$_v"; rebuild_options; printf '%b✓ BIND_ADDR = %s%b\n' "$green" "$_v" "$reset" ;;
         esac
         sleep 1
         ;;
-      c)
+      3)
         _v=$(ask "BIND_PORT [$_bindport]: " "$_bindport")
         case "$_v" in
           ''|*[!0-9]*) printf '%b⚠ Порт должен быть числом%b\n' "$red" "$reset" ;;
           *) if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ] 2>/dev/null; then
-               conf_set BIND_PORT "$_v"; printf '%b✓ BIND_PORT = %s%b\n' "$green" "$_v" "$reset"
+               conf_set BIND_PORT "$_v"; rebuild_options; printf '%b✓ BIND_PORT = %s%b\n' "$green" "$_v" "$reset"
              else printf '%b⚠ Порт вне диапазона 1-65535%b\n' "$red" "$reset"; fi ;;
         esac
         sleep 1
         ;;
-      d|D)
+      4)
         _v=$(ask "OBFUSCATE yes/no [$_obf]: " "$_obf")
         case "$_v" in
           y|Y|yes|YES|д|Д) conf_set OBFUSCATE "yes"; printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset" ;;
@@ -1434,49 +1456,31 @@ config_menu() {
         if [ -n "$_v" ]; then
           conf_set FAKE_SNI "$_v"; printf '%b✓ FAKE_SNI = %s%b\n' "$green" "$_v" "$reset"
         fi
+        rebuild_options
         sleep 1
         ;;
-      e)
+      5)
         _v=$(ask "BOOTSTRAP_DNS [$_doh]: " "$_doh")
         case "$_v" in
-          https://*) conf_set BOOTSTRAP_DNS "$_v"; printf '%b✓ BOOTSTRAP_DNS обновлён%b\n' "$green" "$reset" ;;
+          https://*) conf_set BOOTSTRAP_DNS "$_v"; rebuild_options; printf '%b✓ BOOTSTRAP_DNS обновлён%b\n' "$green" "$reset" ;;
           *) printf '%b⚠ Значение должно начинаться с https://%b\n' "$red" "$reset" ;;
         esac
         sleep 1
         ;;
-      f)
+      6)
         _v=$(ask "SERVER_SELECT random/fastest [$_srvsel]: " "$_srvsel")
         case "$_v" in
-          random|fastest) conf_set SERVER_SELECT "$_v"; printf '%b✓ SERVER_SELECT = %s%b\n' "$green" "$_v" "$reset" ;;
+          random|fastest) conf_set SERVER_SELECT "$_v"; rebuild_options; printf '%b✓ SERVER_SELECT = %s%b\n' "$green" "$_v" "$reset" ;;
           *) printf '%b⚠ Нужно random или fastest%b\n' "$red" "$reset" ;;
         esac
         sleep 1
         ;;
-      g)
+      7)
         _v=$(ask "VERBOSITY 10|20|30|40 [$_verb]: " "$_verb")
         case "$_v" in
-          10|20|30|40) conf_set VERBOSITY "$_v"; printf '%b✓ VERBOSITY = %s%b\n' "$green" "$_v" "$reset" ;;
+          10|20|30|40) conf_set VERBOSITY "$_v"; rebuild_options; printf '%b✓ VERBOSITY = %s%b\n' "$green" "$_v" "$reset" ;;
           *) printf '%b⚠ Допустимы 10, 20, 30, 40%b\n' "$red" "$reset" ;;
         esac
-        sleep 1
-        ;;
-      r|R)
-        # Пересобрать OPTIONS из текущих параметров (сохраняя -api-proxy)
-        _country=$(conf_get COUNTRY);      [ -z "$_country" ] && _country="EU"
-        _bindaddr=$(conf_get BIND_ADDR);   [ -z "$_bindaddr" ] && _bindaddr="0.0.0.0"
-        _bindport=$(conf_get BIND_PORT);   [ -z "$_bindport" ] && _bindport="1080"
-        _obf=$(conf_get OBFUSCATE);        [ -z "$_obf" ] && _obf="yes"
-        _sni=$(conf_get FAKE_SNI)
-        _doh=$(conf_get BOOTSTRAP_DNS);    [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
-        _srvsel=$(conf_get SERVER_SELECT); [ -z "$_srvsel" ] && _srvsel="random"
-        _verb=$(conf_get VERBOSITY);       [ -z "$_verb" ] && _verb="30"
-        _opts="-socks-mode -country $_country -bind-address ${_bindaddr}:${_bindport} -server-selection $_srvsel -verbosity $_verb -bootstrap-dns $_doh"
-        [ "$_obf" = "yes" ] && [ -n "$_sni" ] && _opts="$_opts -fake-SNI $_sni"
-        _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
-        [ -n "$_api" ] && _opts="$_opts $_api"
-        conf_set OPTIONS "$_opts"
-        printf '%b✓ OPTIONS пересобран:%b\n' "$green" "$reset"
-        echo "    \"$_opts\""
         sleep 1
         ;;
       l|L)
@@ -1487,21 +1491,8 @@ config_menu() {
         ask "Нажмите Enter для возврата... " ""
         ;;
       s|S)
-        # Изменения уже сохранены на лету через conf_set; перезапускаем сервис.
-        # Перед перезапуском пересоберём OPTIONS, чтобы он был актуален.
-        _country=$(conf_get COUNTRY);      [ -z "$_country" ] && _country="EU"
-        _bindaddr=$(conf_get BIND_ADDR);   [ -z "$_bindaddr" ] && _bindaddr="0.0.0.0"
-        _bindport=$(conf_get BIND_PORT);   [ -z "$_bindport" ] && _bindport="1080"
-        _obf=$(conf_get OBFUSCATE);        [ -z "$_obf" ] && _obf="yes"
-        _sni=$(conf_get FAKE_SNI)
-        _doh=$(conf_get BOOTSTRAP_DNS);    [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
-        _srvsel=$(conf_get SERVER_SELECT); [ -z "$_srvsel" ] && _srvsel="random"
-        _verb=$(conf_get VERBOSITY);       [ -z "$_verb" ] && _verb="30"
-        _opts="-socks-mode -country $_country -bind-address ${_bindaddr}:${_bindport} -server-selection $_srvsel -verbosity $_verb -bootstrap-dns $_doh"
-        [ "$_obf" = "yes" ] && [ -n "$_sni" ] && _opts="$_opts -fake-SNI $_sni"
-        _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
-        [ -n "$_api" ] && _opts="$_opts $_api"
-        conf_set OPTIONS "$_opts"
+        # Изменения уже сохранены на лету через conf_set; OPTIONS пересобран автоматически.
+        rebuild_options
         if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
           echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
           /opt/etc/init.d/S99opera-proxy restart
