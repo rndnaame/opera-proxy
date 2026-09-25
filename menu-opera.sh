@@ -63,6 +63,10 @@
 #           localhost и IPv6 в скобках ([::1]:1080); пустые октеты IPv4 больше
 #           не считаются валидными; подсказка формата дополнена примером
 #           локального прокси 127.0.0.1:11001.
+#   1.2.13 — исправлено "curl_get: not found" при подборе socks5 (пункт [7][8]):
+#           определение функции curl_get() перенесено в начало скрипта (до всех
+#           вызывающих её функций) — теперь она гарантированно доступна из
+#           конвейеров/подоболочек в любом POSIX-шелле (ash на Keenetic).
 #   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
 #           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
 #           save -> restart -> повторный тест (раньше port-fix и iface-up шли
@@ -74,7 +78,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.12"
+MENU_VERSION="1.2.13"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -97,6 +101,32 @@ if [ -n "$NO_COLOR" ]; then
   green=""; red=""; yellow=""; light_blue=""; bold=""; reset=""
   HL_UPD=""; HL_RST=""
 fi
+
+# Скачать URL; для GitHub — зеркала ghfast / gh-proxy
+curl_get() {
+  _u="$1"
+  _out="$2"
+  rm -f "$_out"
+  if curl -sL -m 12 --connect-timeout 6 -o "$_out" "$_u" 2>/dev/null && [ -s "$_out" ]; then
+    return 0
+  fi
+  case "$_u" in
+    https://raw.githubusercontent.com/*)
+      for _px in \
+        "https://ghfast.top/$_u" \
+        "https://gh-proxy.com/$_u" \
+        "https://mirror.ghproxy.com/$_u"
+      do
+        rm -f "$_out"
+        if curl -sL -m 15 --connect-timeout 8 -o "$_out" "$_px" 2>/dev/null && [ -s "$_out" ]; then
+          return 0
+        fi
+      done
+      ;;
+  esac
+  rm -f "$_out"
+  return 1
+}
 
 ask() {
   prompt="$1"
@@ -868,32 +898,6 @@ POOL=/tmp/s5.pool
 CACHE="/opt/etc/opera-s5.cache"
 rm -f "$TEMP" "$POOL"
 : > "$TEMP"
-
-# Скачать URL; для GitHub — зеркала ghfast / gh-proxy
-curl_get() {
-  _u="$1"
-  _out="$2"
-  rm -f "$_out"
-  if curl -sL -m 12 --connect-timeout 6 -o "$_out" "$_u" 2>/dev/null && [ -s "$_out" ]; then
-    return 0
-  fi
-  case "$_u" in
-    https://raw.githubusercontent.com/*)
-      for _px in \
-        "https://ghfast.top/$_u" \
-        "https://gh-proxy.com/$_u" \
-        "https://mirror.ghproxy.com/$_u"
-      do
-        rm -f "$_out"
-        if curl -sL -m 15 --connect-timeout 8 -o "$_out" "$_px" 2>/dev/null && [ -s "$_out" ]; then
-          return 0
-        fi
-      done
-      ;;
-  esac
-  rm -f "$_out"
-  return 1
-}
 
 fetch_list() {
   _url="$1"
