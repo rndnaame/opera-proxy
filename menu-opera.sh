@@ -9,6 +9,8 @@
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
 #
 # История версий:
+#   1.1.6 — пункт [6]: сверка порта SOCKS (конфиг/процесс/t2sN), тест по фактическому
+#           порту, предложение исправить порт t2s + перезапуск сервиса и повторный тест
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
@@ -17,7 +19,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.5"
+MENU_VERSION="1.1.6"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1103,8 +1105,22 @@ toggle_service() {
 # ---------------------------------------------------------------------------
 # [6] Проверить прокси (через локальный SOCKS5 127.0.0.1)
 # ---------------------------------------------------------------------------
-check_proxy() {
-  print_banner
+
+# Порт, на который настроен upstream интерфейса ProxyN (t2sN) в Keenetic
+iface_socks_port() {
+  _if="${1:-Proxy0}"
+  if ! command -v ndmc >/dev/null 2>&1; then
+    echo ""
+    return 0
+  fi
+  ndmc -c "show running-config" 2>/dev/null \
+    | awk -v ifn="$_if" '
+        $0 ~ "^interface " { cur = ($2 == ifn) ? 1 : 0 }
+        cur && /proxy upstream/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }
+      '
+}
+
+check_proxy_run() {
   find_opera_iface 2>/dev/null || IFACE="Proxy0"
   T2S=$(iface_to_t2s "$IFACE")
   printf '%b\n' "${bold}[6] Проверка прокси через SOCKS5 (127.0.0.1)${reset}"
@@ -1112,20 +1128,45 @@ check_proxy() {
 
   detect_installed
 
-  # Определяем адрес локального SOCKS5 из конфига (BIND_ADDR/BIND_PORT)
+  # Порт SOCKS5 из конфига (BIND_ADDR/BIND_PORT)
   _socks_host="127.0.0.1"
-  _socks_port="18080"
+  _cfg_port=""
   if [ -f "$OP_CONF_FILE" ]; then
-    _bp=$(sed -n 's/^BIND_PORT="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
-    [ -n "$_bp" ] && _socks_port="$_bp"
+    _cfg_port=$(sed -n 's/^BIND_PORT="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
     _ba=$(sed -n 's/^BIND_ADDR="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
     # 0.0.0.0 — слушает всю систему, для клиента подключаемся на localhost
     if [ -n "$_ba" ] && [ "$_ba" != "0.0.0.0" ]; then
       _socks_host="$_ba"
     fi
   fi
-  LOCAL_SOCKS_CHECK="${_socks_host}:${_socks_port}"
-  printf "   SOCKS5 proxy    : %b%s%b\n" "$light_blue" "$LOCAL_SOCKS_CHECK" "$reset"
+
+  # Фактический порт из командной строки запущенного процесса (-bind-address addr:port)
+  _proc_port=""
+  _pid=$(pgrep -f "[o]pera-proxy" 2>/dev/null | head -1)
+  _cmdline=""
+  if [ -n "$_pid" ] && [ -r "/proc/$_pid/cmdline" ]; then
+    _cmdline=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')
+  fi
+  if [ -z "$_cmdline" ]; then
+    _cmdline=$(ps w 2>/dev/null | grep "[o]pera-proxy" | head -1 | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
+  fi
+  if [ -n "$_cmdline" ]; then
+    _proc_port=$(printf '%s' "$_cmdline" | sed -n 's/.*-bind-address[= ][^ :]*:\([0-9][0-9]*\).*/\1/p')
+  fi
+
+  # Порт, указанный в конфиге, если процесс не запущен
+  _use_port="$_cfg_port"
+  [ -n "$_proc_port" ] && _use_port="$_proc_port"
+  [ -z "$_use_port" ] && _use_port="$BIND_PORT_DEFAULT"
+
+  # Порт t2sN-интерфейса (upstream 127.0.0.1:<порт>)
+  _t2s_port=$(iface_socks_port "$IFACE")
+
+  LOCAL_SOCKS_CHECK="${_socks_host}:${_use_port}"
+  printf "   Порт SOCKS5     : конфиг %b%s%b" "$light_blue" "${_cfg_port:-—}" "$reset"
+  printf ", процесс %b%s%b" "$light_blue" "${_proc_port:-—}" "$reset"
+  printf ", интерфейс %s %b%s%b\n" "$T2S" "$light_blue" "${_t2s_port:-—}" "$reset"
+  printf "   Тесты выполняются через: %b%s%b\n" "$bold" "$LOCAL_SOCKS_CHECK" "$reset"
 
   # Проверка: интерфейс t2S (информативно, без него тоже можно работать через SOCKS)
   _up=0
@@ -1140,23 +1181,51 @@ check_proxy() {
     printf "   Интерфейс %s  : %bDOWN / отсутствует%b (проверяем напрямую через SOCKS)\n" "$T2S" "$yellow" "$reset"
   fi
 
-  # Жив ли порт SOCKS5 на 127.0.0.1
+  # Сверка порта теста с портом t2sN: при расхождении — предложить исправить
+  _fix_applied=0
+  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then
+    echo ""
+    printf '%b⚠ Порт SOCKS (%s) отличается от upstream-порта %s (%s)%b\n' \
+      "$yellow" "$_use_port" "$T2S" "$_t2s_port" "$reset"
+    echo "   Трафик роутера через $IFACE идёт на 127.0.0.1:${_t2s_port}, а прокси слушает :${_use_port}."
+    if [ "$(yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_use_port}, перезапустить сервис и повторить тест? [y/N]: " "n")" = "1" ]; then
+      if command -v ndmc >/dev/null 2>&1; then
+        echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_use_port} ..."
+        ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_use_port}" 2>/dev/null || true
+        ndmc -c "system configuration save" 2>/dev/null || true
+        echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
+        /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
+          || /opt/etc/init.d/"$(ls /opt/etc/init.d/ 2>/dev/null | grep -i opera-proxy | head -1)" restart 2>/dev/null \
+          || echo "   ⚠ Не удалось перезапустить сервис"
+        sleep 3
+        _fix_applied=1
+        echo "→ Повторный тест..."
+        echo ""
+      else
+        echo "   ⚠ ndmc не найден — исправьте вручную: interface $IFACE proxy upstream 127.0.0.1 ${_use_port}"
+      fi
+    else
+      echo "   Пропущено (тест продолжается через SOCKS5 :${_use_port})."
+    fi
+  fi
+
+  # Жив ли порт SOCKS5
   _port_ok=0
   if command -v netstat >/dev/null 2>&1; then
-    netstat -ltn 2>/dev/null | grep -qE "[:.]${_socks_port}[[:space:]]" && _port_ok=1
+    netstat -ltn 2>/dev/null | grep -qE "[:.]${_use_port}[[:space:]]" && _port_ok=1
   fi
   if [ "$_port_ok" = "0" ] && command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | grep -qE "[:.]${_socks_port}[[:space:]]" && _port_ok=1
+    ss -ltn 2>/dev/null | grep -qE "[:.]${_use_port}[[:space:]]" && _port_ok=1
   fi
   if [ "$_port_ok" = "0" ] && command -v nc >/dev/null 2>&1; then
-    nc -z -w 2 "$_socks_host" "$_socks_port" 2>/dev/null && _port_ok=1
+    nc -z -w 2 "$_socks_host" "$_use_port" 2>/dev/null && _port_ok=1
   fi
   if [ "$_port_ok" = "1" ]; then
-    printf "   Порт %s        : %bслушается%b\n" "$_socks_port" "$green" "$reset"
+    printf "   Порт %s        : %bслушается%b\n" "$_use_port" "$green" "$reset"
   elif [ "$SVC_RUNNING" = "1" ]; then
-    printf "   Порт %s        : %bне проверен%b (сервис запущен, пробуем запросы)\n" "$_socks_port" "$yellow" "$reset"
+    printf "   Порт %s        : %bне проверен%b (сервис запущен, пробуем запросы)\n" "$_use_port" "$yellow" "$reset"
   else
-    printf "   Порт %s        : %bне слушается%b\n" "$_socks_port" "$red" "$reset"
+    printf "   Порт %s        : %bне слушается%b\n" "$_use_port" "$red" "$reset"
     echo ""
     echo "⚠ Локальный SOCKS5 ($LOCAL_SOCKS_CHECK) недоступен."
     echo "   Запустите сервис (пункт 5) или выполните Fix (пункт 4)."
@@ -1174,14 +1243,6 @@ check_proxy() {
   printf '%b\n' "${bold}  Параметры opera-proxy${reset}"
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
   # Фактическая командная строка процесса
-  _cmdline=""
-  _pid=$(pgrep -f "[o]pera-proxy" 2>/dev/null | head -1)
-  if [ -n "$_pid" ] && [ -r "/proc/$_pid/cmdline" ]; then
-    _cmdline=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')
-  fi
-  if [ -z "$_cmdline" ]; then
-    _cmdline=$(ps w 2>/dev/null | grep "[o]pera-proxy" | head -1 | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
-  fi
   if [ -n "$_cmdline" ]; then
     echo ""
     echo "  Процесс (pid ${_pid:-?}):"
@@ -1282,6 +1343,24 @@ check_proxy() {
     echo "        Попробуйте Fix (пункт 4) или перезапуск сервиса (пункт 5)."
   fi
   echo ""
+}
+
+# Точка входа пункта [6]: при исправлении порта t2sN — полный повторный тест
+check_proxy() {
+  print_banner
+  _cpr_attempt=1
+  while :; do
+    check_proxy_run
+    if [ "${_fix_applied:-0}" = "1" ] && [ "$_cpr_attempt" -lt 2 ]; then
+      _cpr_attempt=$((_cpr_attempt + 1))
+      printf '%b────────────────────────────────────────────────%b\n' "$bold" "$reset"
+      printf '%b  ⟳ ПОВТОРНЫЙ ТЕСТ после исправления порта и перезапуска сервиса%b\n' "$bold" "$reset"
+      printf '%b────────────────────────────────────────────────%b\n' "$bold" "$reset"
+      echo ""
+      continue
+    fi
+    break
+  done
 }
 
 # ---------------------------------------------------------------------------
