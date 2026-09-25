@@ -63,6 +63,10 @@
 #           localhost и IPv6 в скобках ([::1]:1080); пустые октеты IPv4 больше
 #           не считаются валидными; подсказка формата дополнена примером
 #           локального прокси 127.0.0.1:11001.
+#   1.2.14 — пункт [6]: проверка API_PROXY: если в cmdline запущенного процесса
+#           есть -api-proxy socks5://IP:PORT — строка «API : socks5://...» в шапке
+#           и дополнительный тест доступности внешнего SOCKS5 (итог N/5).
+#           Без -api-proxy вывод как раньше (N/4).
 #   1.2.13 — исправлено "curl_get: not found" при подборе socks5 (пункт [7][8]):
 #           определение функции curl_get() перенесено в начало скрипта (до всех
 #           вызывающих её функций) — теперь она гарантированно доступна из
@@ -78,7 +82,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.13"
+MENU_VERSION="1.2.14"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1253,6 +1257,12 @@ check_proxy_run() {
     _proc_port=$(printf '%s' "$_cmdline" | sed -n 's/.*-bind-address[= ][^ :]*:\([0-9][0-9]*\).*/\1/p')
   fi
 
+  # v1.2.14: API_PROXY (-api-proxy) из командной строки запущенного процесса
+  _api_proc=""
+  if [ -n "$_cmdline" ]; then
+    _api_proc=$(printf '%s' "$_cmdline" | sed -n 's/.*-api-proxy[= ]socks5:\/\/\([^ "]*\).*/\1/p')
+  fi
+
   # Порт, указанный в конфиге, если процесс не запущен
   _use_port="$_cfg_port"
   [ -n "$_proc_port" ] && _use_port="$_proc_port"
@@ -1304,6 +1314,10 @@ check_proxy_run() {
   fi
   printf "   Порты  : конфиг %s / процесс %s / %s %s\n" \
     "${_cfg_port:-—}" "${_proc_port:-—}" "$T2S" "${_t2s_port:-—}"
+  # v1.2.14: показываем API_PROXY, если он используется в текущем процессе
+  if [ -n "$_api_proc" ]; then
+    printf "   API    : socks5://%s\n" "$_api_proc"
+  fi
   if [ -n "$_pid" ]; then
     printf "   PID    : %s\n" "$_pid"
   fi
@@ -1475,14 +1489,32 @@ check_proxy_run() {
       printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
   esac
 
+  # v1.2.14: проверка API_PROXY (если -api-proxy используется в текущем процессе):
+  # прямой тест доступности внешнего SOCKS5-прокси из cmdline процесса
+  if [ -n "$_api_proc" ]; then
+    printf '  %-18s' "API_PROXY:"
+    _code=$(curl --proxy "socks5://$_api_proc" -s -o /dev/null \
+      -w "%{http_code}" -m 10 --connect-timeout 7 https://www.google.com/generate_204 2>/dev/null)
+    case "$_code" in
+      204|200|301|302|303|307|308)
+        printf '%bOK%b  (HTTP %s)\n' "$green" "$reset" "$_code"
+        _ok_count=$((_ok_count + 1)) ;;
+      000|"")
+        printf '%bFAIL%b\n' "$red" "$reset" ;;
+      *)
+        printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
+    esac
+  fi
+
   # Итоговая сводка
   echo ""
-  if [ "$_ok_count" -ge 3 ]; then
-    printf "  %b✓ Прокси работает%b  (%s/4)\n" "$green" "$reset" "$_ok_count"
+  if [ -n "$_api_proc" ]; then _tests_total=5; else _tests_total=4; fi
+  if [ "$_ok_count" -ge $((_tests_total - 1)) ]; then
+    printf "  %b✓ Прокси работает%b  (%s/%s)\n" "$green" "$reset" "$_ok_count" "$_tests_total"
   elif [ "$_ok_count" -ge 1 ]; then
-    printf "  %b! Частично%b  (%s/4) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
+    printf "  %b! Частично%b  (%s/%s) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count" "$_tests_total"
   else
-    printf "  %b✗ Прокси не отвечает%b  (0/4)  (Fix — п.4, перезапуск — п.5)\n" "$red" "$reset"
+    printf "  %b✗ Прокси не отвечает%b  (0/%s)  (Fix — п.4, перезапуск — п.5)\n" "$red" "$reset" "$_tests_total"
     # v1.2.9: если тесты прогнаны ПОСЛЕ применения исправлений и всё равно 0/4 —
     # повторный полный прогон бессмысленен (дублирует вывод). Даём подсказку.
     if [ "${_fix_applied:-0}" = "1" ] || [ "${_up_iface_applied:-0}" = "1" ]; then
