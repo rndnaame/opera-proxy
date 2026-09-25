@@ -38,6 +38,12 @@
 #           подменю выбора расширено до [1]-[6], добавлены описания 50/60
 #   1.2.5 — пункт [6]: если хотя бы одна проверка прошла, а t2sN DOWN —
 #           предложить поднять интерфейс (ndmc up) и повторить проверку заново
+#   1.2.6 — пункт [6]: компактный вывод — убраны блоки «Параметры opera-proxy» и
+#           разделители секций; статусы в одну таблице; IP-сервисы показывают
+#           IP прямо в строке теста; полный cmdline процесса — по флагу -v
+#   1.2.7 — пункт [6]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
+#           полный cmdline — только по флагу запуска: ./menu-opera.sh 6 -v;
+#           перенос cmdline без fold (нет в Entware/BusyBox) — awk, фолбэк sed
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -45,7 +51,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.5"
+MENU_VERSION="1.2.7"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1225,10 +1231,6 @@ check_proxy_run() {
   _t2s_port=$(iface_socks_port "$IFACE")
 
   LOCAL_SOCKS_CHECK="${_socks_host}:${_use_port}"
-  printf "   Порт SOCKS5     : конфиг %b%s%b" "$light_blue" "${_cfg_port:-—}" "$reset"
-  printf ", процесс %b%s%b" "$light_blue" "${_proc_port:-—}" "$reset"
-  printf ", интерфейс %s %b%s%b\n" "$T2S" "$light_blue" "${_t2s_port:-—}" "$reset"
-  printf "   Тесты выполняются через: %b%s%b\n" "$bold" "$LOCAL_SOCKS_CHECK" "$reset"
 
   # Проверка: интерфейс t2S (информативно, без него тоже можно работать через SOCKS)
   _up=0
@@ -1239,39 +1241,6 @@ check_proxy_run() {
     _up=1
   elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
     _up=1
-  fi
-  if [ "$_up" = "1" ]; then
-    printf "   Интерфейс %s  : %bUP%b\n" "$T2S" "$green" "$reset"
-  else
-    printf "   Интерфейс %s  : %bDOWN / отсутствует%b (проверяем напрямую через SOCKS)\n" "$T2S" "$yellow" "$reset"
-  fi
-
-  # Сверка порта теста с портом t2sN: при расхождении — предложить исправить
-  _fix_applied=0
-  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then
-    echo ""
-    printf '%b⚠ Порт SOCKS (%s) отличается от upstream-порта %s (%s)%b\n' \
-      "$yellow" "$_use_port" "$T2S" "$_t2s_port" "$reset"
-    echo "   Трафик роутера через $IFACE идёт на 127.0.0.1:${_t2s_port}, а прокси слушает :${_use_port}."
-    if [ "$(yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_use_port}, перезапустить сервис и повторить тест? [y/N]: " "n")" = "1" ]; then
-      if command -v ndmc >/dev/null 2>&1; then
-        echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_use_port} ..."
-        ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_use_port}" 2>/dev/null || true
-        ndmc -c "system configuration save" 2>/dev/null || true
-        echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
-        /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
-          || /opt/etc/init.d/"$(ls /opt/etc/init.d/ 2>/dev/null | grep -i opera-proxy | head -1)" restart 2>/dev/null \
-          || echo "   ⚠ Не удалось перезапустить сервис"
-        sleep 3
-        _fix_applied=1
-        echo "→ Повторный тест..."
-        echo ""
-      else
-        echo "   ⚠ ndmc не найден — исправьте вручную: interface $IFACE proxy upstream 127.0.0.1 ${_use_port}"
-      fi
-    else
-      echo "   Пропущено (тест продолжается через SOCKS5 :${_use_port})."
-    fi
   fi
 
   # Жив ли порт SOCKS5
@@ -1285,128 +1254,142 @@ check_proxy_run() {
   if [ "$_port_ok" = "0" ] && command -v nc >/dev/null 2>&1; then
     nc -z -w 2 "$_socks_host" "$_use_port" 2>/dev/null && _port_ok=1
   fi
+
+  # --- Компактная таблица статусов (v1.2.6): всё в одну колонку ---
+  printf "   Сервис : %b%s%b\n" \
+    "$([ "$SVC_RUNNING" = "1" ] && printf '%s' "$green" || printf '%s' "$yellow")" \
+    "$([ "$SVC_RUNNING" = "1" ] && echo запущен || echo остановлен)" "$reset"
   if [ "$_port_ok" = "1" ]; then
-    printf "   Порт %s        : %bслушается%b\n" "$_use_port" "$green" "$reset"
+    printf "   Порт   : %bслушается%b (%s)\n" "$green" "$reset" "$LOCAL_SOCKS_CHECK"
   elif [ "$SVC_RUNNING" = "1" ]; then
-    printf "   Порт %s        : %bне проверен%b (сервис запущен, пробуем запросы)\n" "$_use_port" "$yellow" "$reset"
+    printf "   Порт   : %bне проверен%b (%s, пробуем запросы)\n" "$yellow" "$reset" "$LOCAL_SOCKS_CHECK"
   else
-    printf "   Порт %s        : %bне слушается%b\n" "$_use_port" "$red" "$reset"
-    echo ""
-    echo "⚠ Локальный SOCKS5 ($LOCAL_SOCKS_CHECK) недоступен."
-    echo "   Запустите сервис (пункт 5) или выполните Fix (пункт 4)."
+    printf "   Порт   : %bне слушается%b (%s)\n" "$red" "$reset" "$LOCAL_SOCKS_CHECK"
   fi
-
-  if [ "$SVC_RUNNING" = "1" ]; then
-    printf "   Сервис         : %bзапущен%b\n" "$green" "$reset"
+  if [ "$_up" = "1" ]; then
+    printf "   %s    : %bUP%b\n" "$T2S" "$green" "$reset"
   else
-    printf "   Сервис         : %bостановлен%b\n" "$yellow" "$reset"
+    printf "   %s    : %bDOWN%b\n" "$T2S" "$yellow" "$reset"
   fi
-
-  # Параметры запуска opera-proxy
+  printf "   Порты  : конфиг %s / процесс %s / %s %s\n" \
+    "${_cfg_port:-—}" "${_proc_port:-—}" "$T2S" "${_t2s_port:-—}"
+  if [ -n "$_pid" ]; then
+    printf "   PID    : %s\n" "$_pid"
+  fi
+  if [ "$CHECK_PROXY_VERBOSE" = "1" ] && [ -n "$_cmdline" ]; then
+    # подробный режим: полный cmdline процесса
+    # перенос по словам без fold (в Entware/BusyBox его может не быть): awk, фолбэк sed
+    printf '   Cmdline:\n'
+    if command -v awk >/dev/null 2>&1; then
+      printf '%s\n' "$_cmdline" | awk '{
+        line=""; max=60;
+        for (i=1;i<=NF;i++) {
+          w=length($i) + (line=="" ? 0 : 1);
+          if (length(line)+w > max && line != "") { print "     " line; line=$i; }
+          else { line = (line=="" ? $i : line " " $i); }
+        }
+        if (line != "") print "     " line;
+      }'
+    else
+      printf '%s\n' "$_cmdline" | sed -e 's/\(.\{60\}\) /\1\n/g' -e 's/^/     /'
+    fi
+  fi
   echo ""
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  printf '%b\n' "${bold}  Параметры opera-proxy${reset}"
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  # Фактическая командная строка процесса
-  if [ -n "$_cmdline" ]; then
+
+  # Сверка порта теста с портом t2sN: при расхождении — предложить исправить
+  _fix_applied=0
+  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then
+    printf '%b⚠ Порт SOCKS (%s) ≠ upstream-порт %s (%s)%b\n' \
+      "$yellow" "$_use_port" "$T2S" "$_t2s_port" "$reset"
+    if [ "$(yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_use_port}, перезапустить сервис и повторить тест? [y/N]: " "n")" = "1" ]; then
+      if command -v ndmc >/dev/null 2>&1; then
+        echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_use_port} ..."
+        ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_use_port}" 2>/dev/null || true
+        ndmc -c "system configuration save" 2>/dev/null || true
+        echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
+        /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
+          || /opt/etc/init.d/"$(ls /opt/etc/init.d/ 2>/dev/null | grep -i opera-proxy | head -1)" restart 2>/dev/null \
+          || echo "   ⚠ Не удалось перезапустить сервис"
+        sleep 3
+        _fix_applied=1
+      else
+        echo "   ⚠ ndmc не найден — исправьте вручную: interface $IFACE proxy upstream 127.0.0.1 ${_use_port}"
+      fi
+    else
+      echo "   Пропущено (тест продолжается через SOCKS5 :${_use_port})."
+    fi
     echo ""
-    echo "  Процесс (pid ${_pid:-?}):"
-    echo "    $_cmdline"
   fi
-  echo ""
 
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  printf '%b\n' "${bold}  IP-сервисы (через SOCKS5 $LOCAL_SOCKS_CHECK)${reset}"
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  echo ""
+  if [ "$_port_ok" = "0" ] && [ "$SVC_RUNNING" != "1" ]; then
+    printf '%b⚠ Локальный SOCKS5 (%s) недоступен — запустите сервис (п.5) или Fix (п.4)%b\n' \
+      "$red" "$LOCAL_SOCKS_CHECK" "$reset"
+    echo ""
+  fi
 
+  # --- Тесты: компактный вывод, результат в одной строке ---
   _ok_count=0
 
-  # --- myip.wtf ---
-  printf "  ▶ myip.wtf  ... "
+  # myip.wtf
+  printf '  %-18s' "myip.wtf:"
   _out=$(curl --socks5-hostname "$LOCAL_SOCKS_CHECK" -s -m 10 --connect-timeout 6 myip.wtf 2>/dev/null)
+  _ip1=$(printf '%s\n' "$_out" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+  _ip2=$(printf '%s\n' "$_out" | grep -oE '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -1)
   if [ -n "$_out" ]; then
-    printf '%bOK%b\n' "$green" "$reset"
-    echo "$_out" | sed 's/^/    /'
     _ok_count=$((_ok_count + 1))
+    printf '%bOK%b  %s\n' "$green" "$reset" "${_ip1:-${_ip2:-$(printf '%s' "$_out" | head -1 | cut -c1-40)}}"
   else
-    printf '%bнет ответа%b\n' "$red" "$reset"
+    printf '%bFAIL%b\n' "$red" "$reset"
   fi
-  echo ""
 
-  # --- 2ip.io ---
-  printf "  ▶ 2ip.io    ... "
+  # 2ip.io
+  printf '  %-18s' "2ip.io:"
   _out=$(curl --socks5-hostname "$LOCAL_SOCKS_CHECK" -s -m 10 --connect-timeout 6 2ip.io 2>/dev/null)
+  _ip=$(printf '%s\n' "$_out" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
   if [ -n "$_out" ]; then
-    printf '%bOK%b\n' "$green" "$reset"
-    _ip=$(echo "$_out" | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | head -1)
-    if [ -n "$_ip" ]; then
-      echo "    IP: $_ip"
-    else
-      echo "$_out" | head -5 | sed 's/^/    /'
-    fi
     _ok_count=$((_ok_count + 1))
+    printf '%bOK%b  %s\n' "$green" "$reset" "${_ip:-$(printf '%s' "$_out" | head -1 | cut -c1-40)}"
   else
-    printf '%bнет ответа%b\n' "$red" "$reset"
+    printf '%bFAIL%b\n' "$red" "$reset"
   fi
-  echo ""
 
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  printf '%b\n' "${bold}  Telegram${reset}"
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  echo ""
-
-  # --- web.telegram.org ---
-  printf "  ▶ web.telegram.org  ... "
+  # web.telegram.org
+  printf '  %-18s' "Telegram:"
   _code=$(curl --socks5-hostname "$LOCAL_SOCKS_CHECK" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
     -L https://web.telegram.org 2>/dev/null)
   case "$_code" in
     200|301|302|303|307|308)
       printf '%bOK%b  (HTTP %s)\n' "$green" "$reset" "$_code"
-      _ok_count=$((_ok_count + 1))
-      ;;
+      _ok_count=$((_ok_count + 1)) ;;
     000|"")
-      printf '%bнет ответа%b\n' "$red" "$reset"
-      ;;
+      printf '%bFAIL%b\n' "$red" "$reset" ;;
     *)
-      printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset"
-      ;;
+      printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
   esac
-  echo ""
 
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  printf '%b\n' "${bold}  Google (через интерфейс $T2S)${reset}"
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
-  echo ""
-
-  # --- google.com через t2S-интерфейс ---
-  printf "  ▶ google.com ($T2S)  ... "
+  # google.com через t2S-интерфейс
+  printf '  %-18s' "Google ($T2S):"
   _code=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
     https://www.google.com/generate_204 2>/dev/null)
   case "$_code" in
     204|200|301|302|303|307|308)
       printf '%bOK%b  (HTTP %s)\n' "$green" "$reset" "$_code"
-      _ok_count=$((_ok_count + 1))
-      ;;
+      _ok_count=$((_ok_count + 1)) ;;
     000|"")
-      printf '%bнет ответа%b\n' "$red" "$reset"
-      ;;
+      printf '%bFAIL%b\n' "$red" "$reset" ;;
     *)
-      printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset"
-      ;;
+      printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
   esac
-  echo ""
 
   # Итоговая сводка
-  printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
+  echo ""
   _up_iface_applied=0
   if [ "$_ok_count" -ge 3 ]; then
-    printf "  Итог: %bпрокси работает%b  (%s/4 проверок)\n" "$green" "$reset" "$_ok_count"
+    printf "  %b✓ Прокси работает%b  (%s/4)\n" "$green" "$reset" "$_ok_count"
   elif [ "$_ok_count" -ge 1 ]; then
-    printf "  Итог: %bчастично%b  (%s/4) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
+    printf "  %b! Частично%b  (%s/4) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count"
   else
-    printf "  Итог: %bпрокси не отвечает%b  (0/4)\n" "$red" "$reset"
-    echo "        Попробуйте Fix (пункт 4) или перезапуск сервиса (пункт 5)."
+    printf "  %b✗ Прокси не отвечает%b  (0/4)  (Fix — п.4, перезапуск — п.5)\n" "$red" "$reset"
   fi
 
   # v1.2.5: хоть одна проверка прошла, а t2sN DOWN — предложить поднять интерфейс
@@ -1444,6 +1427,9 @@ check_proxy_run() {
 # Точка входа пункта [6]: после исправления порта или подъёма t2sN — полный повторный тест
 check_proxy() {
   print_banner
+  # Компактный вывод (v1.2.6); полный cmdline процесса — по флагу -v: ./menu-opera.sh 6 -v
+  CHECK_PROXY_VERBOSE=0
+  case "${CHECK_PROXY_ARG:-}" in -v|--verbose|v) CHECK_PROXY_VERBOSE=1 ;; esac
   _cpr_attempt=1
   while :; do
     check_proxy_run
@@ -2240,9 +2226,20 @@ run_menu() {
 # main
 # ---------------------------------------------------------------------------
 main() {
+  # Аргументы: ./menu-opera.sh [6 [-v]] — сразу запустить проверку прокси; -v = с полным cmdline
+  for _a in "$@"; do
+    case "$_a" in
+      6) RUN_ITEM_6=1 ;;
+      -v|--verbose|v) CHECK_PROXY_ARG="$_a" ;;
+    esac
+  done
   # Если stdin — труба (curl|sh), перенаправляем на /dev/tty для меню
   if [ -r /dev/tty ]; then
     exec </dev/tty >/dev/tty 2>/dev/tty
+  fi
+  if [ "${RUN_ITEM_6:-0}" = "1" ]; then
+    check_proxy
+    ask "Нажмите Enter для возврата в меню... " ""
   fi
   run_menu
 }
