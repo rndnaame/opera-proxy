@@ -11,15 +11,15 @@
 # История версий:
 #   1.1.6 — пункт [6]: сверка порта SOCKS (конфиг/процесс/t2sN), тест по фактическому
 #           порту, предложение исправить порт t2s + перезапуск сервиса и повторный тест
+#   1.1.7 — дефолтный порт везде 18080; пункт [7] при смене BIND_PORT проверяет/синхронизирует upstream t2sN
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
-
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
 #   1.1.2 — пункт [6]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.1.6"
+MENU_VERSION="1.1.7"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1378,7 +1378,7 @@ COUNTRY="EU"
 
 # Адрес и порт (0.0.0.0 — доступен роутеру и всей домашней сети)
 BIND_ADDR="0.0.0.0"
-BIND_PORT="1080"
+BIND_PORT="18080"
 
 # Обход блокировок ТСПУ/DPI в РФ
 OBFUSCATE="yes"
@@ -1422,7 +1422,7 @@ rebuild_options() {
   local r_country r_bindaddr r_bindport r_obf r_sni r_doh r_srvsel r_verb r_opts r_api
   r_country=$(conf_get COUNTRY);      [ -z "$r_country" ] && r_country="EU"
   r_bindaddr=$(conf_get BIND_ADDR);   [ -z "$r_bindaddr" ] && r_bindaddr="0.0.0.0"
-  r_bindport=$(conf_get BIND_PORT);   [ -z "$r_bindport" ] && r_bindport="1080"
+  r_bindport=$(conf_get BIND_PORT);   [ -z "$r_bindport" ] && r_bindport="$BIND_PORT_DEFAULT"
   r_obf=$(conf_get OBFUSCATE);        [ -z "$r_obf" ] && r_obf="yes"
   r_sni=$(conf_get FAKE_SNI)
   r_doh=$(conf_get BOOTSTRAP_DNS);    [ -z "$r_doh" ] && r_doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
@@ -1459,7 +1459,7 @@ config_menu() {
     # Текущие значения (с дефолтами, если чего-то нет в conf)
     _country=$(conf_get COUNTRY);          [ -z "$_country" ] && _country="EU"
     _bindaddr=$(conf_get BIND_ADDR);       [ -z "$_bindaddr" ] && _bindaddr="0.0.0.0"
-    _bindport=$(conf_get BIND_PORT);       [ -z "$_bindport" ] && _bindport="1080"
+    _bindport=$(conf_get BIND_PORT);       [ -z "$_bindport" ] && _bindport="$BIND_PORT_DEFAULT"
     _obf=$(conf_get OBFUSCATE);            [ -z "$_obf" ] && _obf="yes"
     _sni=$(conf_get FAKE_SNI);             [ -z "$_sni" ] && _sni="2gis.com"
     _doh=$(conf_get BOOTSTRAP_DNS);        [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
@@ -1520,9 +1520,39 @@ config_menu() {
           ''|*[!0-9]*) printf '%b⚠ Порт должен быть числом%b\n' "$red" "$reset" ;;
           *) if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ] 2>/dev/null; then
                conf_set BIND_PORT "$_v"; rebuild_options; printf '%b✓ BIND_PORT = %s%b\n' "$green" "$_v" "$reset"
+               # Синхронизация с интерфейсом Opera (t2sN): проверить upstream-порт и предложить исправить
+               find_opera_iface 2>/dev/null || IFACE="Proxy0"
+               _t2s3=$(iface_to_t2s "$IFACE")
+               _t2sport=$(iface_socks_port "$IFACE")
+               if [ "$_t2sport" != "$_v" ]; then
+                 echo ""
+                 printf '%b⚠ Интерфейс %s (%s) сейчас настроен на 127.0.0.1:%s, а прокси будет слушать :%s%b\n' \
+                   "$yellow" "$IFACE" "$_t2s3" "${_t2sport:-—}" "$_v" "$reset"
+                 if [ "$(yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_v} и перезапустить сервис? [y/N]: " "y")" = "1" ]; then
+                   if command -v ndmc >/dev/null 2>&1; then
+                     echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_v} ..."
+                     ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_v}" 2>/dev/null || true
+                     ndmc -c "system configuration save" 2>/dev/null || true
+                     printf '%b   ✓ upstream %s → 127.0.0.1:%s%b\n' "$green" "$_t2s3" "$_v" "$reset"
+                   else
+                     echo "   ⚠ ndmc не найден — исправьте вручную: interface $IFACE proxy upstream 127.0.0.1 ${_v}"
+                   fi
+                   if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+                     echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
+                     /opt/etc/init.d/S99opera-proxy restart 2>/dev/null || true
+                     printf '%b✓ Сервис перезапущен. Проверить можно в пункте [6].%b\n' "$green" "$reset"
+                   else
+                     printf '%b⚠ S99opera-proxy не найден — изменения сохранены, но сервис не перезапущен.%b\n' "$yellow" "$reset"
+                   fi
+                 else
+                   echo "   Пропущено. Не забудьте перенастроить upstream $_t2s3 вручную и перезапустить сервис ([s])."
+                 fi
+               else
+                 printf '   ✓ Порт интерфейса %s (%s) уже совпадает: 127.0.0.1:%s\n' "$IFACE" "$_t2s3" "$_v"
+               fi
              else printf '%b⚠ Порт вне диапазона 1-65535%b\n' "$red" "$reset"; fi ;;
         esac
-        sleep 1
+        sleep 2
         ;;
       4)
         _v=$(ask "OBFUSCATE yes/no [$_obf]: " "$_obf")
