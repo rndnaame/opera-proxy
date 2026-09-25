@@ -25,6 +25,9 @@
 #           в busybox ash/dash (stderr наследует внешний /dev/null) — логи не шли
 #           в журнал. Теперь конвейер вида "( daemon $OPTIONS 2>&1 | logger -t NAME ) &",
 #           проверено на dash/bash с эмуляцией logger
+#   1.2.2 — syslog-wrapper: при остановке сервиса t2sN интерфейс Opera уходит в DOWN,
+#           при запуске — поднимается в UP (интерфейс ищется по upstream-порту из
+#           OPTIONS, фолбэк — по description Opera; через ndmc + config save)
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -32,7 +35,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.1"
+MENU_VERSION="1.2.2"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1478,8 +1481,9 @@ init_has_logger() {
 write_syslog_init_wrapper() {
   cat > "$1" << 'WRAPEOF'
 #!/bin/sh
-### menu-opera syslog wrapper v2 (v1.2.0) ###
+### menu-opera syslog wrapper v3 (v1.2.2) ###
 # Управляет opera-proxy и шлёт весь вывод демона в системный журнал Keenetic.
+# При stop соответствующий интерфейс Opera (t2sN) уходит в DOWN, при start — UP.
 # Отключение логирования: удалите строку LOG_TO_SYSLOG="yes" в /opt/etc/opera-proxy.conf
 # Возврат к стандартному скрипту: cp S99opera-proxy.bak.<ts> S99opera-proxy
 
@@ -1501,6 +1505,47 @@ is_running() {
     return 0
 }
 
+# Управление состоянием t2s-интерфейса, привязанного к SOCKS-порту демона:
+# запуск сервиса → UP интерфейс Opera, остановка → DOWN.
+iface_num_by_port() {
+    # Печатает N для ProxyN/t2sN, чей upstream = 127.0.0.1:<порт>; пусто если нет
+    _p="$1"
+    command -v ndmc >/dev/null 2>&1 || return 0
+    ndmc -c "show running-config" 2>/dev/null | awk -v p="$_p" '
+        /^interface Proxy[0-9]+/ { cur=$2 }
+        /proxy upstream 127\.0\.0\.1[ \t]+/ {
+            n = $NF
+            gsub(/[^0-9]/, "", n)
+            if (n == p && cur != "") { sub(/^Proxy/, "", cur); print cur; exit }
+        }'
+}
+
+opera_iface_num() {
+    # Ищем интерфейс по порту из OPTIONS (-bind-address ...:<порт>);
+    # фолбэк — интерфейс с description Opera.
+    _bp=$(echo "$OPTIONS" | sed -n 's/.*-bind-address[ \t][ \t]*[^: ]*:\([0-9][0-9]*\).*/\1/p')
+    _n=""
+    [ -n "$_bp" ] && _n=$(iface_num_by_port "$_bp")
+    if [ -z "$_n" ]; then
+        _n=$(ndmc -c "show running-config" 2>/dev/null | awk '
+            /^interface Proxy[0-9]+/ { cur=$2 }
+            /description.*(OperaProxy|Opera)/ { sub(/^Proxy/, "", cur); print cur; exit }')
+    fi
+    [ -z "$_n" ] && _n=0
+    echo "$_n"
+}
+
+t2s_set_state() {
+    # $1 = up|down
+    command -v ndmc >/dev/null 2>&1 || return 0
+    _n=$(opera_iface_num)
+    ndmc -c "interface Proxy$_n $1" 2>/dev/null
+    ndmc -c "system configuration save" 2>/dev/null
+}
+
+t2s_up()   { t2s_set_state up; }
+t2s_down() { t2s_set_state down; }
+
 do_start() {
     is_running && { echo "$NAME уже запущен (pid $(cat $PIDFILE))"; return 0; }
     load_conf
@@ -1519,6 +1564,7 @@ do_start() {
         if [ -n "$_pid" ]; then
             echo "$_pid" > "$PIDFILE"
             echo "$NAME запущен (pid $_pid)"
+            t2s_up
             return 0
         fi
         sleep 1
@@ -1536,6 +1582,7 @@ do_stop() {
         rm -f "$PIDFILE"
     fi
     pidof "$NAME" >/dev/null 2>&1 && pkill -x "$NAME" 2>/dev/null
+    t2s_down
     echo "$NAME остановлен"
 }
 
