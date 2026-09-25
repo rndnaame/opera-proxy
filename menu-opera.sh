@@ -36,6 +36,8 @@
 #   1.2.4 — исправлены уровни VERBOSITY по справке opera-proxy:
 #           10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent (без вывода);
 #           подменю выбора расширено до [1]-[6], добавлены описания 50/60
+#   1.2.5 — пункт [6]: если хотя бы одна проверка прошла, а t2sN DOWN —
+#           предложить поднять интерфейс (ndmc up) и повторить проверку заново
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
 #   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
@@ -43,7 +45,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.4"
+MENU_VERSION="1.2.5"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1230,6 +1232,9 @@ check_proxy_run() {
 
   # Проверка: интерфейс t2S (информативно, без него тоже можно работать через SOCKS)
   _up=0
+  _t2s_exists=0
+  if ip link show "$T2S" >/dev/null 2>&1; then _t2s_exists=1; fi
+  if ifconfig "$T2S" >/dev/null 2>&1; then _t2s_exists=1; fi
   if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
     _up=1
   elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
@@ -1394,6 +1399,7 @@ check_proxy_run() {
 
   # Итоговая сводка
   printf '%b\n' "${light_blue}────────────────────────────────────────────────${reset}"
+  _up_iface_applied=0
   if [ "$_ok_count" -ge 3 ]; then
     printf "  Итог: %bпрокси работает%b  (%s/4 проверок)\n" "$green" "$reset" "$_ok_count"
   elif [ "$_ok_count" -ge 1 ]; then
@@ -1402,19 +1408,56 @@ check_proxy_run() {
     printf "  Итог: %bпрокси не отвечает%b  (0/4)\n" "$red" "$reset"
     echo "        Попробуйте Fix (пункт 4) или перезапуск сервиса (пункт 5)."
   fi
+
+  # v1.2.5: хоть одна проверка прошла, а t2sN DOWN — предложить поднять интерфейс
+  # (SOCKS работает, но трафик роутера через $IFACE не пойдёт, пока туннель опущен)
+  if [ "$_ok_count" -ge 1 ] && [ "$_up" != "1" ]; then
+    echo ""
+    printf '%b⚠ Прокси отвечает через SOCKS5, но интерфейс %s DOWN.%b\n' \
+      "$yellow" "$T2S" "$reset"
+    if [ "$_t2s_exists" = "1" ]; then
+      echo "   Трафик роутера через $IFACE не пойдёт, пока туннель опущен."
+    else
+      echo "   Интерфейс $T2S не найден (возможен пересоздание интерфейса Opera)."
+    fi
+    if command -v ndmc >/dev/null 2>&1; then
+      if [ "$(yes_no "   Поднять $T2S ($IFACE up) и повторить проверку? [Y/n]: " "y")" = "1" ]; then
+        _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9]\+\)$/\1/p')
+        [ -z "$_n" ] && _n=0
+        echo "→ ndmc: interface Proxy$_n up ..."
+        ndmc -c "interface Proxy$_n up" 2>/dev/null || true
+        ndmc -c "system configuration save" 2>/dev/null || true
+        sleep 2
+        _up_iface_applied=1
+        echo "→ Повторная проверка..."
+        echo ""
+      else
+        echo "   Пропущено."
+      fi
+    else
+      echo "   ⚠ ndmc не найден — поднимите вручную: interface $IFACE up"
+    fi
+  fi
   echo ""
 }
 
-# Точка входа пункта [6]: при исправлении порта t2sN — полный повторный тест
+# Точка входа пункта [6]: после исправления порта или подъёма t2sN — полный повторный тест
 check_proxy() {
   print_banner
   _cpr_attempt=1
   while :; do
     check_proxy_run
-    if [ "${_fix_applied:-0}" = "1" ] && [ "$_cpr_attempt" -lt 2 ]; then
+    _need_retry=0
+    [ "${_fix_applied:-0}" = "1" ] && _need_retry=1
+    [ "${_up_iface_applied:-0}" = "1" ] && _need_retry=1
+    if [ "$_need_retry" = "1" ] && [ "$_cpr_attempt" -lt 2 ]; then
       _cpr_attempt=$((_cpr_attempt + 1))
       printf '%b────────────────────────────────────────────────%b\n' "$bold" "$reset"
-      printf '%b  ⟳ ПОВТОРНЫЙ ТЕСТ после исправления порта и перезапуска сервиса%b\n' "$bold" "$reset"
+      if [ "${_up_iface_applied:-0}" = "1" ]; then
+        printf '%b  ⟳ ПОВТОРНАЯ ПРОВЕРКА после подъёма интерфейса %s%b\n' "$bold" "$T2S" "$reset"
+      else
+        printf '%b  ⟳ ПОВТОРНЫЙ ТЕСТ после исправления порта и перезапуска сервиса%b\n' "$bold" "$reset"
+      fi
       printf '%b────────────────────────────────────────────────%b\n' "$bold" "$reset"
       echo ""
       continue
