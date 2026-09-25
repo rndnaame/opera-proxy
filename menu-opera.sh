@@ -55,6 +55,10 @@
 #           up туннеля, restart) применяются ДО тестов, после ожидания UP/порта
 #           тесты выполняются ровно ОДИН раз — без заголовков «ПОВТОРНАЯ ПРОВЕРКА»
 #           и задублированного вывода (регрессия 1.2.8/1.2.9).
+#   1.2.11 — пункт [7]: новый подпункт [8] «Изменить API_PROXY»: 1) задать вручную
+#           (IP:PORT с валидацией и проверкой живости), 2) подбор рабочего socks5
+#           из публичных списков, 3) отключить. API_PROXY хранится отдельной
+#           переменной в конфиге; rebuild_options/Fix учитывают её.
 #   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
 #           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
 #           save -> restart -> повторный тест (раньше port-fix и iface-up шли
@@ -66,7 +70,7 @@
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 
-MENU_VERSION="1.2.10"
+MENU_VERSION="1.2.11"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -271,6 +275,8 @@ CONFEOF
     {
       echo ""
       echo "# api-proxy (добавлено Fix)"
+      _apival=$(printf '%s' "$_api_extra" | sed 's/^-api-proxy[[:space:]]*//;s#^socks5://##')
+      echo "API_PROXY=\"$_apival\""
       echo "OPTIONS=\"\$OPTIONS $_api_extra\""
     } >> "$OP_CONF_FILE"
   fi
@@ -1026,7 +1032,8 @@ start() {
     OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
     [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ] && OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
     [ -n "$_extra" ] && OPTIONS="$OPTIONS $_extra"
-    # сохранить conf с актуальным OPTIONS
+    # сохранить conf с актуальным OPTIONS (+ API_PROXY отдельной переменной)
+    _api_w=$(printf '%s' "$_extra" | sed 's/^-api-proxy[[:space:]]*//;s#^socks5://##')
     {
       echo "# auto by fix_opera_tunnel"
       echo "COUNTRY=\"$COUNTRY\""
@@ -1037,6 +1044,7 @@ start() {
       echo "BOOTSTRAP_DNS=\"$BOOTSTRAP_DNS\""
       echo "SERVER_SELECT=\"$SERVER_SELECT\""
       echo "VERBOSITY=\"$VERBOSITY\""
+      [ -n "$_api_w" ] && echo "API_PROXY=\"$_api_w\""
       echo "OPTIONS=\"$OPTIONS\""
     } > "$CONF"
   else
@@ -1542,13 +1550,23 @@ conf_get() {
 
 conf_set() {
   # $1 = имя переменной, $2 = новое значение. Заменяет строку VAR="..." в conf.
-  _tmpc="/tmp/opera-conf.$$.tmp"
+  _tmpc="/tmp/opera-conf.$$.${RANDOM:-0}.tmp"
   awk -v k="$1" -v v="$2" '
     BEGIN { done = 0 }
     substr($0, 1, length(k) + 1) == k "=" { print k "=\"" v "\""; done = 1; next }
     { print }
     END { if (!done) print k "=\"" v "\"" }
   ' "$OP_CONF_FILE" > "$_tmpc" 2>/dev/null && mv "$_tmpc" "$OP_CONF_FILE" || rm -f "$_tmpc"
+}
+
+# Удалить все упоминания -api-proxy из конфига (строка OPTIONS и legacy-дописка
+# Fix'а OPTIONS="$OPTIONS -api-proxy ..."). Используется при отключении API_PROXY,
+# чтобы параметр не «возродился» в пересобранном OPTIONS.
+strip_api_proxy_from_conf() {
+  grep -v '^OPTIONS="\$OPTIONS -api-proxy' "$OP_CONF_FILE" > "/tmp/opera-conf.$$.${RANDOM:-0}.tmp" 2>/dev/null \
+    && mv "/tmp/opera-conf.$$.${RANDOM:-0}.tmp" "$OP_CONF_FILE" \
+    || rm -f "/tmp/opera-conf.$$.${RANDOM:-0}.tmp"
+  sed -i 's/ -api-proxy[[:space:]]*socks5:\/\/[^"[:space:]]*//' "$OP_CONF_FILE" 2>/dev/null
 }
 
 # Пересборка OPTIONS из текущих параметров конфига (сохраняя -api-proxy).
@@ -1565,9 +1583,162 @@ rebuild_options() {
   r_verb=$(conf_get VERBOSITY);       [ -z "$r_verb" ] && r_verb="30"
   r_opts="-socks-mode -country $r_country -bind-address ${r_bindaddr}:${r_bindport} -server-selection $r_srvsel -verbosity $r_verb -bootstrap-dns $r_doh"
   [ "$r_obf" = "yes" ] && [ -n "$r_sni" ] && r_opts="$r_opts -fake-SNI $r_sni"
-  r_api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
-  [ -n "$r_api" ] && r_opts="$r_opts $r_api"
+  r_api=$(conf_get API_PROXY)
+  if [ -n "$r_api" ]; then
+    # legacy-дописка Fix'ом: OPTIONS="$OPTIONS -api-proxy ..." в конце конфига —
+    # фактический апстрим хранится там, локальная переменная устарела
+    _leg=$(grep '^OPTIONS="$OPTIONS -api-proxy' "$OP_CONF_FILE" 2>/dev/null | head -1 | sed 's/.*-api-proxy[[:space:]]*//;s#^socks5://##;s/"*$//')
+    [ -n "$_leg" ] && r_api="$_leg"
+  else
+    # API_PROXY не задан (пусто или удалена при отключении): если -api-proxy
+    # остался в старой строке OPTIONS / дописке Fix'а — удаляем их, чтобы
+    # параметр не «возродился» при пересборке
+    strip_api_proxy_from_conf
+  fi
+  [ -n "$r_api" ] && r_opts="$r_opts -api-proxy socks5://$r_api"
   conf_set OPTIONS "$r_opts"
+}
+
+# Текущий API_PROXY (IP:PORT, без префикса socks5://) из конфига.
+# Пустая строка = не задан (в т.ч. после явного отключения).
+conf_get_api_proxy() {
+  # приоритет 1: дописка Fix'а OPTIONS="$OPTIONS -api-proxy socks5://..."
+  _leg=$(grep '^OPTIONS="$OPTIONS -api-proxy' "$OP_CONF_FILE" 2>/dev/null | head -1 | sed 's/.*-api-proxy[[:space:]]*//;s#^socks5://##;s/"*$//')
+  if [ -n "$_leg" ]; then printf '%s' "$_leg"; return 0; fi
+  # приоритет 2: переменная API_PROXY (если её нет и в OPTIONS нет -api-proxy — пусто)
+  _v=$(conf_get API_PROXY)
+  if [ -n "$_v" ]; then printf '%s' "$_v"; return 0; fi
+  # приоритет 3: -api-proxy внутри основной строки OPTIONS (legacy после Fix)
+  case "$(conf_get OPTIONS)" in *'-api-proxy '*)
+    _v=$(conf_get OPTIONS | sed 's/.*-api-proxy[[:space:]]*//;s#^socks5://##')
+    printf '%s' "$_v"; return 0 ;;
+  esac
+  printf ''
+}
+
+# Записать/удалить API_PROXY + пересобрать OPTIONS. Пустое значение = отключить.
+conf_set_api_proxy() {
+  # $1 = "IP:PORT" или "" (отключить)
+  if [ -n "$1" ]; then
+    conf_set API_PROXY "$1"
+  else
+    _tmpc="/tmp/opera-conf.$$.${RANDOM:-0}.tmp"
+    grep -v '^API_PROXY=' "$OP_CONF_FILE" > "$_tmpc" 2>/dev/null && mv "$_tmpc" "$OP_CONF_FILE" || rm -f "$_tmpc"
+  fi
+  rebuild_options
+}
+
+# Валидация "IP:PORT"
+valid_ip_port() {
+  case "$1" in
+    *[!0-9.:]*|"") return 1 ;;
+  esac
+  case "$1" in
+    *:*) : ;;
+    *) return 1 ;;
+  esac
+  _ip=${1%:*}; _pt=${1##*:}
+  case "$_ip" in
+    *[!0-9]*|"") return 1 ;;
+  esac
+  case "$_pt" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$_pt" -ge 1 ] 2>/dev/null && [ "$_pt" -le 65535 ] 2>/dev/null || return 1
+  _octets=$(printf '%s' "$_ip" | awk -F. '{print NF}')
+  [ "$_octets" = "4" ] || return 1
+  _IFS=$IFS; IFS=.
+  for _o in $_ip; do
+    [ "$_o" -le 255 ] 2>/dev/null || { IFS=$_IFS; return 1; }
+  done
+  IFS=$_IFS
+  return 0
+}
+
+# Проверка работоспособности socks5-прокси (IP:PORT) через HTTP и HTTPS
+socks5_alive() {
+  _sp="$1"
+  _sc=$(curl -x "socks5h://$_sp" -m 4 --connect-timeout 3 -s -o /dev/null -w "%{http_code}" \
+    http://api.ipify.org 2>/dev/null)
+  [ "$_sc" = "200" ] && return 0
+  _sc=$(curl -x "socks5h://$_sp" -m 5 --connect-timeout 3 -s -o /dev/null -w "%{http_code}" \
+    https://api.ipify.org 2>/dev/null)
+  [ "$_sc" = "200" ] && return 0
+  return 1
+}
+
+# Подбор рабочего socks5 из публичных списков (как в Fix, но упрощённо).
+# Аргументы: MAX_TEST (по умолчанию 80), NEED — сколько рабочих найти (по умолчанию 1).
+# Пишет найденные "IP:PORT" построчно в /tmp/opera-s5-found
+pick_socks5_pool() {
+  _maxt="${1:-80}"; _need="${2:-1}"
+  _temp=/tmp/s5.raw; _pool=/tmp/s5.pool; _cache="/opt/etc/opera-s5.cache"
+  rm -f "$_temp" "$_pool" /tmp/opera-s5-found; : > "$_temp"
+  echo "→ Загрузка списков socks5..."
+  _got=0
+  for _u in \
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt|monosans" \
+    "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt|proxmint" \
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all|proxyscrape" \
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt|jetkai" \
+    "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt|relayglass"
+  do
+    _url=${_u%|*}; _lbl=${_u##*|}
+    if curl_get "$_url" /tmp/s5.src; then
+      _n=$(grep -cE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' /tmp/s5.src 2>/dev/null || echo 0)
+      if [ "$_n" -gt 0 ] 2>/dev/null; then
+        echo "   + $_lbl: $_n"
+        cat /tmp/s5.src >> "$_temp"; _got=1
+      fi
+    else
+      echo "   − $_lbl: недоступен"
+    fi
+  done
+  if [ "$_got" = "0" ]; then
+    for _u in \
+      "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt|TheSpeedX" \
+      "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt|hookzof"
+    do
+      _url=${_u%|*}; _lbl=${_u##*|}
+      curl_get "$_url" /tmp/s5.src && { cat /tmp/s5.src >> "$_temp"; _got=1; echo "   + $_lbl (запасной)"; }
+    done
+  fi
+  sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g; s/#.*//' "$_temp" 2>/dev/null \
+    | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' | sort -u > /tmp/s5.norm
+  _nn=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
+  if [ -n "$_nn" ] && [ "$_nn" -ge 5 ]; then
+    mkdir -p "$(dirname "$_cache")" 2>/dev/null || true
+    cp /tmp/s5.norm "$_cache" 2>/dev/null || true
+  elif [ -s "$_cache" ]; then
+    echo "⚠ Источники недоступны — берём кэш $_cache"
+    cp "$_cache" /tmp/s5.norm
+    _nn=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
+  fi
+  if [ -z "$_nn" ] || [ "$_nn" -lt 3 ]; then
+    echo "❌ Нет списка socks5 (сеть/GitHub недоступны, кэш пуст)"
+    return 1
+  fi
+  awk 'BEGIN{srand()} {print rand() "\t" $0}' /tmp/s5.norm 2>/dev/null \
+    | sort -n | cut -f2- > "$_pool"
+  echo "→ Пул: ${_nn} адресов. Перебор до ${_maxt} проверок (нужно ${_need} рабочих)..."
+  _tested=0; _found=0
+  while IFS= read -r _p && [ "$_found" -lt "$_need" ] && [ "$_tested" -lt "$_maxt" ]; do
+    [ -z "$_p" ] && continue
+    _tested=$((_tested + 1))
+    [ $((_tested % 10)) -eq 0 ] && echo "   ... проверено ${_tested}, найдено ${_found}"
+    if socks5_alive "$_p"; then
+      _found=$((_found + 1))
+      echo "   ✓ кандидат #${_found}: $_p (проверено ${_tested})"
+      echo "$_p" >> /tmp/opera-s5-found
+    fi
+  done < "$_pool"
+  rm -f "$_temp" "$_pool" /tmp/s5.norm /tmp/s5.src
+  if [ "$_found" -lt 1 ]; then
+    echo "❌ Рабочих socks5 не найдено (проверено ${_tested})"
+    return 1
+  fi
+  echo "→ Найдено ${_found} за ${_tested} проверок"
+  return 0
 }
 
 # Логирование opera-proxy в системный журнал Keenetic (Мониторинг → Журнал).
@@ -1799,8 +1970,12 @@ config_menu() {
     printf "  %-14s: %b%s%b\n" "BOOTSTRAP_DNS" "$bold" "$_doh" "$reset"
     printf "  %-14s: %b%s%b   (random | fastest)\n" "SERVER_SELECT" "$bold" "$_srvsel" "$reset"
     printf "  %-14s: %b%s%b   (10|20|30|40|50|60)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
-    _api=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1)
-    [ -n "$_api" ] && printf "  %-14s: %b%s%b\n" "API_PROXY" "$yellow" "$_api" "$reset"
+    _api=$(conf_get_api_proxy)
+    if [ -n "$_api" ]; then
+      printf "  %-14s: %bsocks5://%s%b\n" "API_PROXY" "$yellow" "$_api" "$reset"
+    else
+      printf "  %-14s: %b(не задан — прямое подключение)%b\n" "API_PROXY" "$light_blue" "$reset"
+    fi
     echo ""
     printf '%b\n' "${light_blue}──────────────────────────────────────${reset}"
     echo ""
@@ -1811,6 +1986,7 @@ config_menu() {
     echo "  [5] Изменить BOOTSTRAP_DNS"
     echo "  [6] Изменить SERVER_SELECT"
     echo "  [7] Изменить VERBOSITY"
+    echo "  [8] Изменить API_PROXY (socks5-апстрим)"
     echo "  [l] Показать конфиг целиком"
     echo "  [g] Логирование в журнал Keenetic (syslog/logger)"
     echo "  [s] Сохранить + перезапустить сервис"
@@ -1820,7 +1996,7 @@ config_menu() {
     printf '%b\n' "${light_blue}OPTIONS пересобирается автоматически при каждом изменении${reset}"
     echo ""
 
-    _cc=$(ask "Выбор [1-7 / l / g / s / x / 0]: " "0")
+    _cc=$(ask "Выбор [1-8 / l / g / s / x / 0]: " "0")
     case "$_cc" in
       1)
         echo ""
@@ -1953,6 +2129,88 @@ config_menu() {
           fi
         fi
         sleep 1
+        ;;
+      8)
+        echo ""
+        printf '%b\n' "${bold}Изменить API_PROXY (socks5-апстрим для opera-proxy)${reset}"
+        if [ -n "$_api" ]; then
+          echo "   Текущее значение: socks5://${_api}"
+        else
+          echo "   Текущее значение: (не задан — opera-proxy ходит напрямую)"
+        fi
+        echo ""
+        echo "Выберите действие:"
+        echo "  [1] Задать вручную (IP:PORT)"
+        echo "  [2] Запустить подбор рабочего socks5 из публичных списков"
+        echo "  [3] Отключить API_PROXY"
+        echo "  [0] Отмена"
+        _v=$(ask "Ваш выбор: " "")
+        case "$_v" in
+          1)
+            _p=$(ask "   IP:PORT нового апстрима [текущий: ${_api:-без изменений}]: " "")
+            # допускаем ввод с префиксом socks5://
+            _p=$(printf '%s' "$_p" | sed 's#^socks5://##;s/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -z "$_p" ]; then
+              echo "   Отменено (пустой ввод)."
+            elif ! valid_ip_port "$_p"; then
+              printf '%b⚠ Неверный формат. Пример: 72.195.34.59:4145%b\n' "$red" "$reset"
+            else
+              echo "→ Проверка socks5://$_p ..."
+              if socks5_alive "$_p"; then
+                conf_set_api_proxy "$_p"
+                printf '%b✓ API_PROXY = socks5://%s (прокси отвечает, OPTIONS пересобран)%b\n' "$green" "$_p" "$reset"
+              else
+                printf '%b⚠ Прокси %s не отвечает (HTTP и HTTPS через него недоступны).%b\n' "$yellow" "$_p" "$reset"
+                if [ "$(yes_no "   Всё равно сохранить? [y/N]: " "n")" = "1" ]; then
+                  conf_set_api_proxy "$_p"
+                  printf '%b✓ API_PROXY = socks5://%s (сохранено без проверки)%b\n' "$green" "$_p" "$reset"
+                else
+                  echo "   Отменено."
+                fi
+              fi
+            fi
+            ;;
+          2)
+            echo "   Подбор может занять несколько минут (скачивание списков + перебор)."
+            if [ "$(yes_no "   Продолжить? [Y/n]: " "y")" = "1" ]; then
+              if pick_socks5_pool 80 1; then
+                _pick=$(head -1 /tmp/opera-s5-found 2>/dev/null)
+                if [ -n "$_pick" ]; then
+                  printf '%b   ✓ Найден рабочий: socks5://%s%b\n' "$green" "$_pick" "$reset"
+                  if [ "$(yes_no "   Применить (записать в конфиг и перезапустить сервис)? [Y/n]: " "y")" = "1" ]; then
+                    conf_set_api_proxy "$_pick"
+                    printf '%b✓ API_PROXY = socks5://%s (OPTIONS пересобран)%b\n' "$green" "$_pick" "$reset"
+                    if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+                      echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
+                      /opt/etc/init.d/S99opera-proxy restart
+                      printf '%b✓ Сервис перезапущен. Проверить можно в пункте [6].%b\n' "$green" "$reset"
+                    fi
+                  else
+                    echo "   Пропущено. Можно применить позже через [s]."
+                  fi
+                fi
+              else
+                printf '%b⚠ Подбор не дал результата. Можно задать адрес вручную ([1]) или выполнить Fix — п.[4].%b\n' "$yellow" "$reset"
+              fi
+              rm -f /tmp/opera-s5-found
+            fi
+            ;;
+          3)
+            if [ -z "$_api" ]; then
+              echo "   API_PROXY и так не задан."
+            elif [ "$(yes_no "   Отключить API_PROXY (удалить -api-proxy из OPTIONS)? [y/N]: " "n")" = "1" ]; then
+              conf_set_api_proxy ""
+              printf '%b✓ API_PROXY отключён (OPTIONS пересобран). Перезапустите сервис: [s] или п.[5].%b\n' "$green" "$reset"
+            fi
+            ;;
+          0)
+            echo "   Отменено."
+            ;;
+          *)
+            printf '%b⚠ Неверный выбор: %s (нужно 1-3 или 0)%b\n' "$red" "$_v" "$reset"
+            ;;
+        esac
+        sleep 2
         ;;
       l|L)
         echo ""
