@@ -8,112 +8,10 @@
 #   sh menu-opera.sh
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
 #
-# История версий:
-#   1.1.6 — пункт [5]: сверка порта SOCKS (конфиг/процесс/t2sN), тест по фактическому
-#           порту, предложение исправить порт t2s + перезапуск сервиса и повторный тест
-#   1.1.7 — дефолтный порт везде 18080; пункт [7] при смене BIND_PORT проверяет/синхронизирует upstream t2sN
-#   1.1.8 — пункт [7]: выбор COUNTRY и VERBOSITY через нумерованное подменю
-#   1.1.9 — логирование в журнал Keenetic: п.7[7] предлагает включить logger,
-#           новый пункт [g] в настройке конфига (автоматическая logger-обёртка
-#           в S99opera-proxy с backup; rc.func сам по себе stderr в syslog не пишет)
-#   1.2.0 — исправление 1.1.9: переопределение start_cmd() не работало (rc.func не
-#           вызывает его). Теперь S99opera-proxy полностью заменяется wrapper-скриптом
-#           с запуском демона через конвейер "| logger -t opera-proxy" (pidfile,
-#           start/stop/restart/status); конфиг получает LOG_TO_SYSLOG="yes";
-#           подсказка диагностики при пустом журнале
-#   1.2.1 — исправление 1.2.0: "exec 2>&1" внутри фоновой под-оболочки не работает
-#           в busybox ash/dash (stderr наследует внешний /dev/null) — логи не шли
-#           в журнал. Теперь конвейер вида "( daemon $OPTIONS 2>&1 | logger -t NAME ) &",
-#           проверено на dash/bash с эмуляцией logger
-#   1.2.2 — syslog-wrapper: при остановке сервиса t2sN интерфейс Opera уходит в DOWN,
-#           при запуске — поднимается в UP (интерфейс ищется по upstream-порту из
-#           OPTIONS, фолбэк — по description Opera; через ndmc + config save)
-#   1.2.3 — исправление 1.2.2: пункт [5] вызывал stop стандартного init-скрипта
-#           (rc.func), который ничего не знает о t2s — интерфейс оставался UP.
-#           Теперь п.[5] сам опускает/поднимает t2sN (по порту из конфига, как в п.[6]),
-#           а wrapper-скрипт ищет интерфейс ещё и по BIND_ADDR/BIND_PORT из конфига
-#           (upstream мог быть настроен на порт, отличный от -bind-address демона)
-#   1.2.4 — исправлены уровни VERBOSITY по справке opera-proxy:
-#           10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent (без вывода);
-#           подменю выбора расширено до [1]-[6], добавлены описания 50/60
-#   1.2.5 — пункт [5]: если хотя бы одна проверка прошла, а t2sN DOWN —
-#           предложить поднять интерфейс (ndmc up) и повторить проверку заново
-#   1.2.6 — пункт [5]: компактный вывод — убраны блоки «Параметры opera-proxy» и
-#           разделители секций; статусы в одну таблице; IP-сервисы показывают
-#           IP прямо в строке теста; полный cmdline процесса — по флагу -v
-#   1.2.7 — пункт [5]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
-#           полный cmdline — только по флагу запуска: ./menu-opera.sh 6 -v;
-#           перенос cmdline без fold (нет в Entware/BusyBox) — awk, фолбэк sed
-#   1.2.9 — исправление 1.2.8: в пункте [5] тесты выполнялись СРАЗУ после «ndmc up»
-#           и restart, до фактического поднятия туннеля — первый проход давал 0/4
-#           и лишний повторный вывод. Теперь: (1) порядок «up → save → restart»;
-#           (2) ожидание реального UP интерфейса (до ~15 с); (3) ожидание старта
-#           прослушивания SOCKS-порта; (4) если после исправлений тесты не прошли —
-#           результат показывается один раз (без дублирующего блока), при UP-туннеле
-#           даётся подсказка обождать и повторить п.6.
-#   1.2.10 — пункт [5]: убран повторный прогон тестов. Исправления (порт upstream,
-#           up туннеля, restart) применяются ДО тестов, после ожидания UP/порта
-#           тесты выполняются ровно ОДИН раз — без заголовков «ПОВТОРНАЯ ПРОВЕРКА»
-#           и задублированного вывода (регрессия 1.2.8/1.2.9).
-#   1.2.11 — пункт [7]: новый подпункт [8] «Изменить API_PROXY»: 1) задать вручную
-#           (IP:PORT с валидацией и проверкой живости), 2) подбор рабочего socks5
-#           из публичных списков, 3) отключить. API_PROXY хранится отдельной
-#           переменной в конфиге; rebuild_options/Fix учитывают её.
-#   1.2.12 — пункт [7][8]: исправлена валидация HOST:PORT — принимаются
-#           localhost и IPv6 в скобках ([::1]:1080); пустые октеты IPv4 больше
-#           не считаются валидными; подсказка формата дополнена примером
-#           локального прокси 127.0.0.1:11001.
-#   1.2.15 — syslog-wrapper v5: логирование через FIFO + фоновый читатель
-#           (logger/tail) вместо конвейера "daemon | logger". Демон больше не
-#           стоит в пайпе — устранены ложные завершения "Server terminated with
-#           a reason: interrupt signal received" при stop/restart; остановка
-#           шлёт SIGTERM (graceful shutdown), читатель останавливается вместе
-#           с сервисом; при отсутствии logger — фолбэк tail -F в файл лога.
-#   1.2.18 — пункт [4] Fix: в fix_opera_tunnel.sh добавлено определение функции
-#           curl_get() (fix-скрипт пишется отдельным heredoc и запускается
-#           cron'ом вне menu-opera.sh — раньше все источники socks5 давали
-#           "curl_get: not found" и подбор шёл только из кэша); LOCAL_SOCKS в
-#           fix-скрипте теперь берёт BIND_PORT из конфига (дефолт 18080).
-#   1.2.17 — исправлен daemon_cmd (wrapper v7): перенаправления вынесены из
-#           функции
-#           (раньше "cmd ... >FIFO" внутри функции терялись, демон падал при
-#           закрытии SSH-терминала); запуск в собственной сессии через
-#           setsid sh -c exec + фоновый режим с корректным pidfile.
-#   1.2.16 — запуск демона через setsid/nohup (перехват SIGHUP): случайные
-#           "Server terminated with a reason: interrupt signal received" больше
-#           не возникают, даже если терминал SSH закрывается или shell рассылает
-#           сигналы группе процессов; stop по-прежнему шлёт SIGTERM (graceful).
-#   1.2.14 — пункт [5]: проверка API_PROXY: если в cmdline запущенного процесса
-#           есть -api-proxy socks5://IP:PORT — строка «API : socks5://...» в шапке
-#           и дополнительный тест доступности внешнего SOCKS5 (итог N/5).
-#           Без -api-proxy вывод как раньше (N/4).
-#   1.2.13 — исправлено "curl_get: not found" при подборе socks5 (пункт [7][8]):
-#           определение функции curl_get() перенесено в начало скрипта (до всех
-#           вызывающих её функций) — теперь она гарантированно доступна из
-#           конвейеров/подоболочек в любом POSIX-шелле (ash на Keenetic).
-#   1.2.8 — пункт [5]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
-#           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
-#           save -> restart -> повторный тест (раньше port-fix и iface-up шли
-#           двумя отдельными проходами с промежуточным прогоном всех тестов)
-#   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
-#   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
-#   1.1.3 — пункт [5]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
-#   1.1.2 — пункт [5]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
-#   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
-#   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
-#   1.2.19 — CTRL+C / setsid в старом wrapper
-#   1.3.0  — логирование с нуля: init без rc.func; setsid → файл;
-#           tail -F | logger -t opera-proxy → журнал Keenetic/Netcraze
+# История версий: см. README.md (раздел «История версий меню»)
+#   https://github.com/rndnaame/opera-proxy/blob/main/README.md
 
-#   1.3.1  — убрано логирование в syslog (init-wrapper, [7][g], LOG_TO_SYSLOG)
-#   1.3.2 — ask/yes_no без $(…): один процесс меню в ps (не subshell)
-#   1.3.3 — оптимизация: единый conf-шаблон, BIND_ADDR=127.0.0.1 везде,
-#           detect_installed без хардкода t2s0
-#   1.3.4 — [6] API_PROXY: та же проверка, что [7] (socks5h + ipify), без ложного FAIL
-#   1.3.5 — [6] API_PROXY через ipinfo.io: OK  IP (CC, City)
-#   1.3.6 — убран пункт [3] Обновление Bin из GitHub
-#   1.3.7 — нумерация меню: Fix/сервис/проверка/конфиг → [3]–[6]
-MENU_VERSION="1.3.7"
+MENU_VERSION="1.3.10"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -260,24 +158,32 @@ show_status() {
     printf "   Сервис      : %bнет init-скрипта%b\n" "$red" "$reset"
   fi
 
+  # Туннель ProxyN / t2sN: отдельно «нет интерфейса» и «опущен (DOWN)»
   find_opera_iface 2>/dev/null || IFACE="Proxy0"
   T2S=$(iface_to_t2s "$IFACE")
-  T2S0_UP=0
-  if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
-    T2S0_UP=1
-  elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
-    T2S0_UP=1
+  _t2s_exists=0
+  _t2s_up=0
+  if ip link show "$T2S" >/dev/null 2>&1 || ifconfig "$T2S" >/dev/null 2>&1; then
+    _t2s_exists=1
   fi
-  if [ "$T2S0_UP" = "1" ]; then
-    printf "   %s (%s): %bUP%b\n" "$T2S" "$IFACE" "$green" "$reset"
+  if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
+    _t2s_up=1
+  elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
+    _t2s_up=1
+  fi
+  if [ "$_t2s_up" = "1" ]; then
+    printf "   Туннель     : %s (%s)  %bUP%b\n" "$T2S" "$IFACE" "$green" "$reset"
+  elif [ "$_t2s_exists" = "1" ]; then
+    printf "   Туннель     : %s (%s)  %bопущен (DOWN)%b\n" "$T2S" "$IFACE" "$yellow" "$reset"
   else
-    printf "   %s (%s): %bDOWN / нет%b\n" "$T2S" "$IFACE" "$yellow" "$reset"
+    printf "   Туннель     : %bинтерфейс не создан%b  (ожидался %s / %s)\n" \
+      "$yellow" "$reset" "$T2S" "$IFACE"
   fi
 
   if [ "$FIX_EXISTS" = "1" ]; then
-    printf "   Fix-скрипт  : %bесть%b (%s)\n" "$green" "$reset" "$FIX_SCRIPT"
+    printf "   Автопочинка : %bвключена%b\n" "$green" "$reset"
   else
-    printf "   Fix-скрипт  : %bнет%b\n" "$yellow" "$reset"
+    printf "   Автопочинка : %bнет%b  (п.3 — починить туннель)\n" "$yellow" "$reset"
   fi
   echo ""
 }
@@ -699,11 +605,11 @@ upgrade_opera_proxy() {
 
 
 # ---------------------------------------------------------------------------
-# [3] Fix Opera (+socks5)
+# [3] Починить туннель (socks5 / api-proxy)
 # ---------------------------------------------------------------------------
 fix_opera() {
   print_banner
-  printf '%b\n' "${bold}[3] Fix Opera (+socks5)${reset}"
+  printf '%b\n' "${bold}[3] Починить туннель${reset}"
   echo ""
 
   if [ ! -f /opt/etc/init.d/S99opera-proxy ]; then
@@ -757,9 +663,18 @@ show_config() {
   [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"
 }
 
-# IFACE/T2S задаются выше в fix-скрипте; fallback Proxy0/t2s0
-[ -z "$IFACE" ] && IFACE="Proxy0"
-[ -z "$T2S" ] && T2S="t2s0"
+# IFACE по description Opera/OperaProxy → t2sN (сразу, до проверок)
+IFACE="Proxy0"
+_rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+_found=$(printf '%s\n' "$_rc" | awk '
+  /^interface Proxy[0-9]+/ { cur=$2 }
+  /description.*(OperaProxy|Opera)/ { print cur; exit }
+')
+[ -n "$_found" ] && IFACE="$_found"
+_n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9][0-9]*\)$/\1/p')
+[ -z "$_n" ] && _n=0
+T2S="t2s$_n"
+log notice "Интерфейс: $IFACE ($T2S)"
 
 # Проверка IP через Keenetic tunnel iface
 check_ip() {
@@ -776,8 +691,7 @@ check_telegram() {
   esac
 }
 
-# Проверка напрямую через локальный SOCKS opera-proxy (без Proxy0)
-# Порт из конфига (BIND_PORT), по умолчанию 18080
+# Проверка через локальный SOCKS opera-proxy (без t2sN)
 LOCAL_SOCKS="127.0.0.1:$(sed -n 's/^[[:space:]]*BIND_PORT="\{0,1\}\([0-9]\{1,5\}\)"\{0,1\}.*/\1/p' /opt/etc/opera-proxy.conf 2>/dev/null | head -1)"
 [ -z "$LOCAL_SOCKS" ] && LOCAL_SOCKS="127.0.0.1:18080"
 case "$LOCAL_SOCKS" in *:*) : ;; *) LOCAL_SOCKS="127.0.0.1:18080" ;; esac
@@ -795,42 +709,33 @@ check_telegram_local() {
   esac
 }
 
-# Полная проверка туннеля Keenetic (t2s0)
 tunnel_ok() {
   if ! check_ip; then
     log err "✗ IP через $T2S: нет"
     return 1
   fi
-  log warn "✓ IP: $LAST_IP"
+  log warn "✓ IP ($T2S): $LAST_IP"
   if ! check_telegram; then
     log err "✗ Telegram через $T2S: нет"
     return 1
   fi
-  log warn "✓ Telegram: OK"
+  log warn "✓ Telegram ($T2S): OK"
   return 0
 }
 
-# ── Быстрый выход, если всё уже работает ──
-if tunnel_ok; then
-  log warn "✓ Туннель работает (IP + Telegram)"
-  show_config
-  exit 0
-fi
-
-log err "✗ Туннель требует восстановления (IP и/или Telegram)"
-
-# IFACE по description Opera/OperaProxy → t2sN
-IFACE="Proxy0"
-_rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
-_found=$(printf '%s\n' "$_rc" | awk '
-  /^interface Proxy[0-9]+/ { cur=$2 }
-  /description.*(OperaProxy|Opera)/ { print cur; exit }
-')
-[ -n "$_found" ] && IFACE="$_found"
-_n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9][0-9]*\)$/\1/p')
-[ -z "$_n" ] && _n=0
-T2S="t2s$_n"
-log notice "Интерфейс: $IFACE ($T2S)"
+socks_ok() {
+  if ! check_ip_local; then
+    log err "✗ IP через SOCKS $LOCAL_SOCKS: нет"
+    return 1
+  fi
+  log warn "✓ IP (SOCKS): $LAST_IP"
+  if ! check_telegram_local; then
+    log err "✗ Telegram через SOCKS: нет"
+    return 1
+  fi
+  log warn "✓ Telegram (SOCKS): OK"
+  return 0
+}
 
 proxy0_down() {
   log warn "$IFACE → down (тишина в журнале на время подбора)"
@@ -847,7 +752,35 @@ proxy0_up() {
   sleep 3
 }
 
-# Порядок: down → списки → отбор → up → тест Opera
+# ── Диагностика (не ломаем рабочий SOCKS из‑за DOWN t2s) ──
+# 1) t2s OK            → выход
+# 2) SOCKS OK, t2s нет → только поднять iface (без смены api-proxy)
+# 3) SOCKS мёртв       → полный recovery (подбор socks5)
+
+if tunnel_ok; then
+  log warn "✓ Туннель работает (IP + Telegram через $T2S)"
+  show_config
+  exit 0
+fi
+
+if socks_ok; then
+  log warn "✓ opera-proxy (SOCKS) работает — api-proxy не трогаем"
+  log warn "→ Поднимаем $IFACE ($T2S), без смены socks5..."
+  proxy0_up
+  sleep 2
+  if tunnel_ok; then
+    log warn "✓ Туннель восстановлен (только $IFACE up)"
+    show_config
+    exit 0
+  fi
+  log err "✗ SOCKS жив, но $T2S после up всё ещё не ходит — полный recovery"
+else
+  log err "✗ SOCKS $LOCAL_SOCKS не отвечает — нужен подбор api-proxy"
+fi
+
+log err "✗ Туннель требует восстановления (подбор socks5)"
+
+# Порядок: down → списки → отбор → local-test → up
 proxy0_down
 
 TEMP=/tmp/s5.raw
@@ -1181,7 +1114,7 @@ iface_socks_port() {
 check_proxy_run() {
   find_opera_iface 2>/dev/null || IFACE="Proxy0"
   T2S=$(iface_to_t2s "$IFACE")
-  printf '%b\n' "${bold}[5] Проверка прокси через SOCKS5 (127.0.0.1)${reset}"
+  printf '%b\n' "${bold}[5] Проверка прокси${reset}"
   echo ""
 
   detect_installed
@@ -1251,34 +1184,59 @@ check_proxy_run() {
     nc -z -w 2 "$_socks_host" "$_use_port" 2>/dev/null && _port_ok=1
   fi
 
-  # --- Компактная таблица статусов (v1.2.6): всё в одну колонку ---
-  printf "   Сервис : %b%s%b\n" \
-    "$([ "$SVC_RUNNING" = "1" ] && printf '%s' "$green" || printf '%s' "$yellow")" \
-    "$([ "$SVC_RUNNING" = "1" ] && echo запущен || echo остановлен)" "$reset"
+  # Согласованность портов: mismatch только если t2s/конфиг/процесс расходятся
+  _port_mismatch=0
+  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then _port_mismatch=1; fi
+  if [ -n "$_cfg_port" ] && [ -n "$_proc_port" ] && [ "$_cfg_port" != "$_proc_port" ]; then
+    _port_mismatch=1
+  fi
+
+  # --- Шапка (компактно): один SOCKS-порт; детали — только при расхождении ---
+  if [ "$SVC_RUNNING" = "1" ]; then
+    if [ -n "$_pid" ]; then
+      printf "   Сервис   : %bзапущен%b  (pid %s)\n" "$green" "$reset" "$_pid"
+    else
+      printf "   Сервис   : %bзапущен%b\n" "$green" "$reset"
+    fi
+  else
+    printf "   Сервис   : %bостановлен%b\n" "$yellow" "$reset"
+  fi
+
   if [ "$_port_ok" = "1" ]; then
-    printf "   Порт   : %bслушается%b (%s)\n" "$green" "$reset" "$LOCAL_SOCKS_CHECK"
+    printf "   SOCKS    : %s  %b✓ слушается%b\n" "$LOCAL_SOCKS_CHECK" "$green" "$reset"
   elif [ "$SVC_RUNNING" = "1" ]; then
-    printf "   Порт   : %bне проверен%b (%s, пробуем запросы)\n" "$yellow" "$reset" "$LOCAL_SOCKS_CHECK"
+    printf "   SOCKS    : %s  %b? не проверен%b (пробуем запросы)\n" "$LOCAL_SOCKS_CHECK" "$yellow" "$reset"
   else
-    printf "   Порт   : %bне слушается%b (%s)\n" "$red" "$reset" "$LOCAL_SOCKS_CHECK"
+    printf "   SOCKS    : %s  %b✗ не слушается%b\n" "$LOCAL_SOCKS_CHECK" "$red" "$reset"
   fi
+
   if [ "$_up" = "1" ]; then
-    printf "   %s    : %bUP%b\n" "$T2S" "$green" "$reset"
+    if [ -n "$_t2s_port" ]; then
+      if [ "$_t2s_port" = "$_use_port" ]; then
+        printf "   Туннель  : %s %bUP%b  →  127.0.0.1:%s\n" "$T2S" "$green" "$reset" "$_t2s_port"
+      else
+        printf "   Туннель  : %s %bUP%b  →  порт %s  %b⚠ ≠ SOCKS %s%b\n" \
+          "$T2S" "$green" "$reset" "$_t2s_port" "$yellow" "$_use_port" "$reset"
+      fi
+    else
+      printf "   Туннель  : %s %bUP%b\n" "$T2S" "$green" "$reset"
+    fi
   else
-    printf "   %s    : %bDOWN%b\n" "$T2S" "$yellow" "$reset"
+    printf "   Туннель  : %s %bDOWN%b\n" "$T2S" "$yellow" "$reset"
   fi
-  printf "   Порты  : конфиг %s / процесс %s / %s %s\n" \
-    "${_cfg_port:-—}" "${_proc_port:-—}" "$T2S" "${_t2s_port:-—}"
-  # v1.2.14: показываем API_PROXY, если он используется в текущем процессе
+
+  if [ "$_port_mismatch" = "1" ]; then
+    printf "   Согласование портов:\n"
+    printf "     конфиг   %s\n" "${_cfg_port:-—}"
+    printf "     процесс  %s\n" "${_proc_port:-—}"
+    printf "     %-8s %s\n" "$T2S" "${_t2s_port:-—}"
+  fi
+
   if [ -n "$_api_proc" ]; then
-    printf "   API    : socks5://%s\n" "$_api_proc"
+    printf "   API      : socks5://%s\n" "$_api_proc"
   fi
-  if [ -n "$_pid" ]; then
-    printf "   PID    : %s\n" "$_pid"
-  fi
+
   if [ "$CHECK_PROXY_VERBOSE" = "1" ] && [ -n "$_cmdline" ]; then
-    # подробный режим: полный cmdline процесса
-    # перенос по словам без fold (в Entware/BusyBox его может не быть): awk, фолбэк sed
     printf '   Cmdline:\n'
     if command -v awk >/dev/null 2>&1; then
       printf '%s\n' "$_cmdline" | awk '{
@@ -1296,12 +1254,9 @@ check_proxy_run() {
   fi
   echo ""
 
-  # v1.2.8: все неисправности (расхождение порта + DOWN t2s) собираются до тестов
-  # и чинятся за ОДИН проход: upstream -> up -> save -> restart -> повторный тест
+  # Неисправности (порт / DOWN t2s) — чинятся до тестов за один проход
   _fix_applied=0
   _up_iface_applied=0
-  _port_mismatch=0
-  if [ -n "$_t2s_port" ] && [ "$_t2s_port" != "$_use_port" ]; then _port_mismatch=1; fi
 
   if [ "$_port_mismatch" = "1" ] || [ "$_up" != "1" ]; then
     _ndmc_ok=0
@@ -2303,7 +2258,7 @@ run_menu() {
     echo ""
     echo "  [1]  Установить Opera-proxy"
     echo "  [2]  Обновить Opera-proxy (opkg)"
-    echo "  [3]  Fix Opera (+socks5)"
+    echo "  [3]  Починить туннель"
     echo "  [4]  Остановить / Запустить сервис"
     echo "  [5]  Проверить прокси"
     echo "  [6]  Настройка конфига"
