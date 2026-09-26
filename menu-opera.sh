@@ -101,8 +101,15 @@
 #   1.1.2 — пункт [6]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
+#   1.2.19 — CTRL+C / setsid в старом wrapper
+#   1.3.0  — логирование с нуля: init без rc.func; setsid → файл;
+#           tail -F | logger -t opera-proxy → журнал Keenetic/Netcraze
 
-MENU_VERSION="1.2.18"
+#   1.3.1  — убрано логирование в syslog (init-wrapper, [7][g], LOG_TO_SYSLOG)
+#   1.3.2 — ask/yes_no без $(…): один процесс меню в ps (не subshell)
+#   1.3.3 — оптимизация: единый conf-шаблон, BIND_ADDR=127.0.0.1 везде,
+#           detect_installed без хардкода t2s0
+MENU_VERSION="1.3.3"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -152,25 +159,25 @@ curl_get() {
   return 1
 }
 
+# ask: пишет ответ в REPLY (без subshell — один процесс в ps)
 ask() {
   prompt="$1"
   default="$2"
   if [ -r /dev/tty ]; then
     printf "%s" "$prompt" > /dev/tty
-    read -r answer < /dev/tty || answer="$default"
+    read -r REPLY < /dev/tty || REPLY="$default"
   else
-    answer="$default"
+    REPLY="$default"
   fi
-  [ -z "$answer" ] && answer="$default"
-  echo "$answer"
+  [ -z "$REPLY" ] && REPLY="$default"
 }
 
+# yes_no: пишет 1|0 в YESNO (без subshell)
 yes_no() {
-  # $1 prompt, $2 default y|n → 1|0
-  a=$(ask "$1" "$2")
-  case "$a" in
-    y|Y|yes|YES|д|Д) echo 1 ;;
-    *) echo 0 ;;
+  ask "$1" "$2"
+  case "$REPLY" in
+    y|Y|yes|YES|д|Д) YESNO=1 ;;
+    *) YESNO=0 ;;
   esac
 }
 
@@ -217,13 +224,7 @@ detect_installed() {
     fi
   fi
 
-  T2S0_UP=0
-  if ip link show t2s0 2>/dev/null | grep -q "state UP"; then
-    T2S0_UP=1
-  elif ifconfig t2s0 2>/dev/null | grep -q "UP"; then
-    T2S0_UP=1
-  fi
-
+  # Состояние t2sN / IFACE считает show_status (через find_opera_iface)
   FIX_EXISTS=0
   [ -f "$FIX_SCRIPT" ] && FIX_EXISTS=1
 }
@@ -284,11 +285,11 @@ OP_CONF_FILE="/opt/etc/opera-proxy.conf"
 IFACE_DESC="OperaProxy"
 BIND_PORT_DEFAULT="18080"
 
-# Записать conf (SNI/DoH/COUNTRY). Не затирает существующий без force.
+# Записать conf. Один источник правды — OPERA_CONF_TEMPLATE (ниже по файлу
+# подставляется при первом вызове, если ещё не задан — локальный минимум).
 write_opera_conf() {
   _force="${1:-}"
   if [ -f "$OP_CONF_FILE" ] && [ "$_force" != "force" ]; then
-    # уже есть — только убедимся, что OPTIONS собирается
     if ! grep -q 'fake-SNI\|BOOTSTRAP_DNS\|COUNTRY=' "$OP_CONF_FILE" 2>/dev/null; then
       echo "   ⚠ старый conf без SNI/DoH — обновляем (force)"
       _force="force"
@@ -301,34 +302,25 @@ write_opera_conf() {
   if [ -f "$OP_CONF_FILE" ]; then
     _api_extra=$(grep -oE '\-api-proxy[[:space:]]+[^"[:space:]]+' "$OP_CONF_FILE" 2>/dev/null | head -1 || true)
   fi
-  cat > "$OP_CONF_FILE" << 'CONFEOF'
-# Конфигурация opera-proxy (Keenetic / Entware)
-# После правок: /opt/etc/init.d/S99opera-proxy restart
-
-# Регион: EU | AM | AS
+  if [ -n "${OPERA_CONF_TEMPLATE:-}" ]; then
+    printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE"
+  else
+    # шаблон ещё не объявлен (ранний вызов) — минимальный conf
+    cat > "$OP_CONF_FILE" << 'CONFEOF'
 COUNTRY="EU"
-
-# 127.0.0.1 — только роутер; 0.0.0.0 — вся LAN
 BIND_ADDR="127.0.0.1"
 BIND_PORT="18080"
-
-# Обход ТСПУ/DPI
 OBFUSCATE="yes"
 FAKE_SNI="2gis.com"
-
-# DoH для поиска серверов Opera
 BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
-
-# random | fastest
 SERVER_SELECT="random"
 VERBOSITY="30"
-
-# Сборка OPTIONS (раскрывается при source conf)
 OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
 if [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ]; then
   OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
 fi
 CONFEOF
+  fi
   if [ -n "$_api_extra" ]; then
     {
       echo ""
@@ -641,7 +633,8 @@ install_opera_menu() {
   echo "  [0]  Назад"
   echo ""
 
-  sub=$(ask "Выбор [0-2]: " "0")
+  ask "Выбор [0-2]: " "0"
+  sub=$REPLY
   case "$sub" in
     1) do_install_official ;;
     2)
@@ -727,7 +720,8 @@ update_opera_bin() {
 
   if [ -n "$LATEST_NORM" ] && [ "$CURRENT_NORM" = "$LATEST_NORM" ]; then
     echo "✅ Версия уже актуальная ($CURRENT)"
-    if [ "$(yes_no "Принудительно обновить? [y/N]: " "n")" != "1" ]; then
+    yes_no "Принудительно обновить? [y/N]: " "n"
+    if [ "$YESNO" != "1" ]; then
       echo "Обновление отменено."
       return 0
     fi
@@ -765,7 +759,8 @@ update_opera_bin() {
 
   chmod +x "$TMP"
 
-  if [ "$(yes_no "Сжать UPX? [y/N]: " "n")" = "1" ]; then
+  yes_no "Сжать UPX? [y/N]: " "n"
+    if [ "$YESNO" = "1" ]; then
     if ! command -v upx >/dev/null 2>&1; then
       echo "→ Установка upx ..."
       opkg update >/dev/null 2>&1 || true
@@ -1228,7 +1223,8 @@ toggle_service() {
   if [ "$SVC_RUNNING" = "1" ]; then
     echo "Сервис сейчас: запущен"
     echo ""
-    if [ "$(yes_no "Остановить сервис? [Y/n]: " "y")" = "1" ]; then
+    yes_no "Остановить сервис? [Y/n]: " "y"
+    if [ "$YESNO" = "1" ]; then
       /opt/etc/init.d/S99opera-proxy stop
       killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
       # v1.2.3: опускаем t2s-интерфейс Opera (стандартный rc.func-скрипт сам не умеет)
@@ -1240,7 +1236,8 @@ toggle_service() {
   else
     echo "Сервис сейчас: остановлен"
     echo ""
-    if [ "$(yes_no "Запустить сервис? [Y/n]: " "y")" = "1" ]; then
+    yes_no "Запустить сервис? [Y/n]: " "y"
+    if [ "$YESNO" = "1" ]; then
       /opt/etc/init.d/S99opera-proxy start
       sleep 2
       if pgrep -f "[o]pera-proxy" >/dev/null 2>&1; then
@@ -1421,7 +1418,9 @@ check_proxy_run() {
       echo "   ⚠ ndmc не найден — исправьте вручную:"
       [ "$_port_mismatch" = "1" ] && echo "     interface $IFACE proxy upstream 127.0.0.1 ${_use_port}"
       [ "$_up" != "1" ] && echo "     interface $IFACE up"
-    elif [ "$(yes_no "$_q" "y")" = "1" ]; then
+    else
+      yes_no "$_q" "y"
+      if [ "$YESNO" = "1" ]; then
       if [ "$_port_mismatch" = "1" ]; then
         echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_use_port} ..."
         ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_use_port}" 2>/dev/null || true
@@ -1474,8 +1473,9 @@ check_proxy_run() {
       fi
       _fix_applied=1
       echo "→ Повторная проверка..."
-    else
-      echo "   Пропущено (тест продолжается как есть)."
+      else
+        echo "   Пропущено (тест продолжается как есть)."
+      fi
     fi
     echo ""
   fi
@@ -1606,8 +1606,8 @@ OPERA_CONF_TEMPLATE='# ───────────────────
 # Регион: EU (Европа), AS (Азия), AM (Америка)
 COUNTRY="EU"
 
-# Адрес и порт (0.0.0.0 — доступен роутеру и всей домашней сети)
-BIND_ADDR="0.0.0.0"
+# 127.0.0.1 — только роутер (Proxy/t2s); 0.0.0.0 — вся LAN
+BIND_ADDR="127.0.0.1"
 BIND_PORT="18080"
 
 # Обход блокировок ТСПУ/DPI в РФ
@@ -1623,9 +1623,6 @@ SERVER_SELECT="random"
 # Уровень логов: 10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent
 VERBOSITY="30"
 
-# Логи opera-proxy в системный журнал Keenetic (Мониторинг → Журнал): yes/no
-# Требует logger-обёртку в init-скрипте (пункт [7] → [g])
-LOG_TO_SYSLOG="yes"
 
 # ── Автогенерация OPTIONS для Entware init.d / rc.func ────────
 OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
@@ -1848,267 +1845,6 @@ pick_socks5_pool() {
   return 0
 }
 
-# Логирование opera-proxy в системный журнал Keenetic (Мониторинг → Журнал).
-#
-# Как это работает:
-#   Бинарник opera-proxy пишет ВСЕ логи в stderr (см. Alexey71/opera-proxy:
-#   logDst := os.Stderr). Стандартный Entware rc.func запускает демон через
-#   start-stop-daemon --background, который НЕ перенаправляет stderr никуда —
-#   он уходит в /dev/null. Поэтому даже при VERBOSITY=10 в журнале тишина.
-#   Попытка v1.1.9 переопределить start_cmd() не сработала: в rc.func нет
-#   такой точки расширения (запуск выполняет его внутренняя start()).
-#
-# Решение — полная замена S99opera-proxy на wrapper-скрипт:
-#   exec 2>&1 | logger -t opera-proxy  — весь вывод демона построчно уходит
-#   в syslog с тегом "opera-proxy", откуда его показывает веб-журнал Keenetic.
-#   Управление (start/stop/restart/status) реализовано через pidfile.
-#
-# Для отключения логирования достаточно удалить из конфига строку LOG_TO_SYSLOG="yes".
-# Возвращает 0, если init-скрипт уже является logger-обёрткой.
-init_has_logger() {
-  [ -f "$OP_INIT" ] && grep -q 'menu-opera syslog wrapper' "$OP_INIT" 2>/dev/null
-}
-
-# Полноценный wrapper init-скрипта: запуск opera-proxy с перенаправлением
-# stderr/stdout в syslog через logger. Ставится вместо стандартного rc.func-скрипта.
-write_syslog_init_wrapper() {
-  cat > "$1" << 'WRAPEOF'
-#!/bin/sh
-### menu-opera syslog wrapper v7 (v1.2.17) ###
-# Управляет opera-proxy и шлёт весь вывод демона в системный журнал Keenetic.
-# Логирование реализовано через FIFO + фоновый читатель (logger/tail), а не
-# конвейер "daemon | logger": демон НЕ является частью пайпа, поэтому сигналы
-# (SIGTERM/SIGINT) доходят корректно и случайные "interrupt signal received"
-# при рестартах/остановках больше не возникают.
-# v6: демон запускается в собственной сессии (setsid; фолбэк — nohup+trap),
-#     поэтому закрытие SSH-терминала / рассылка SIGHUP группе процессов shell
-#     его больше не убивает.
-# При stop соответствующий интерфейс Opera (t2sN) уходит в DOWN, при start — UP.
-# Отключение логирования: удалите строку LOG_TO_SYSLOG="yes" в /opt/etc/opera-proxy.conf
-# Возврат к стандартному скрипту: cp S99opera-proxy.bak.<ts> S99opera-proxy
-
-CONF=/opt/etc/opera-proxy.conf
-PIDFILE=/opt/var/run/opera-proxy.pid
-NAME=opera-proxy
-DAEMON=/opt/sbin/opera-proxy
-FIFO=/opt/var/run/opera-proxy.log.fifo
-READER_PIDFILE=/opt/var/run/opera-proxy-logger.pid
-[ -x "$DAEMON" ] || DAEMON=$(command -v opera-proxy 2>/dev/null)
-
-load_conf() {
-    [ -f "$CONF" ] && . "$CONF"
-    [ -n "$OPTIONS" ] || OPTIONS="-socks-mode -country EU -bind-address 127.0.0.1:18080"
-}
-
-is_running() {
-    [ -f "$PIDFILE" ] || return 1
-    _pid=$(cat "$PIDFILE" 2>/dev/null)
-    [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null || { rm -f "$PIDFILE"; return 1; }
-    return 0
-}
-
-# Управление состоянием t2s-интерфейса, привязанного к SOCKS-порту демона:
-# запуск сервиса → UP интерфейс Opera, остановка → DOWN.
-iface_num_by_port() {
-    # Печатает N для ProxyN/t2sN, чей upstream = 127.0.0.1:<порт>; пусто если нет
-    _p="$1"
-    command -v ndmc >/dev/null 2>&1 || return 0
-    ndmc -c "show running-config" 2>/dev/null | awk -v p="$_p" '
-        /^interface Proxy[0-9]+/ { cur=$2 }
-        /proxy upstream 127\.0\.0\.1[ \t]+/ {
-            n = $NF
-            gsub(/[^0-9]/, "", n)
-            if (n == p && cur != "") { sub(/^Proxy/, "", cur); print cur; exit }
-        }'
-}
-
-opera_iface_num() {
-    # Ищем интерфейс по порту: сначала BIND_ADDR/BIND_PORT из конфига (v1.2.3 —
-    # upstream ProxyN настраивается именно по BIND_PORT), затем порт из OPTIONS
-    # (-bind-address ...:<порт>); фолбэк — интерфейс с description Opera.
-    _n=""
-    [ -n "$BIND_PORT" ] && _n=$(iface_num_by_port "$BIND_PORT")
-    if [ -z "$_n" ]; then
-        _bp=$(echo "$OPTIONS" | sed -n 's/.*-bind-address[ \t][ \t]*[^: ]*:\([0-9][0-9]*\).*/\1/p')
-        [ -n "$_bp" ] && _n=$(iface_num_by_port "$_bp")
-    fi
-    if [ -z "$_n" ]; then
-        _n=$(ndmc -c "show running-config" 2>/dev/null | awk '
-            /^interface Proxy[0-9]+/ { cur=$2 }
-            /description.*(OperaProxy|Opera)/ { sub(/^Proxy/, "", cur); print cur; exit }')
-    fi
-    [ -z "$_n" ] && _n=0
-    echo "$_n"
-}
-
-t2s_set_state() {
-    # $1 = up|down
-    command -v ndmc >/dev/null 2>&1 || return 0
-    _n=$(opera_iface_num)
-    ndmc -c "interface Proxy$_n $1" 2>/dev/null
-    ndmc -c "system configuration save" 2>/dev/null
-}
-
-t2s_up()   { t2s_set_state up; }
-t2s_down() { t2s_set_state down; }
-
-reader_running() {
-    [ -f "$READER_PIDFILE" ] || return 1
-    _rpid=$(cat "$READER_PIDFILE" 2>/dev/null)
-    [ -n "$_rpid" ] && kill -0 "$_rpid" 2>/dev/null || { rm -f "$READER_PIDFILE"; return 1; }
-    return 0
-}
-
-start_reader() {
-    # Фоновый читатель FIFO: строки из $FIFO уходят в syslog (BusyBox logger).
-    # busybox "logger -t NAME" читает stdin до EOF, поэтому оборачиваем его
-    # в цикл: при закрытии writer'ом читатель перезапускается и ждёт дальше.
-    # Если logger недоступен — фолбэк на tail -F в текстовый лог-файл.
-    reader_running && return 0
-    rm -f "$FIFO"
-    mkfifo "$FIFO" 2>/dev/null || { echo "$NAME: не удалось создать FIFO (syslog-логирование пропущено)"; return 1; }
-    if command -v logger >/dev/null 2>&1; then
-        ( while :; do
-              if [ -r "$FIFO" ]; then logger -t "$NAME" < "$FIFO"; fi
-              sleep 1
-          done ) </dev/null >/dev/null 2>&1 &
-    else
-        ( while :; do
-              if [ -r "$FIFO" ]; then tail -F "$FIFO" >> /opt/var/log/opera-proxy.log 2>/dev/null; fi
-              sleep 1
-          done ) </dev/null >/dev/null 2>&1 &
-    fi
-    echo $! > "$READER_PIDFILE"
-    sleep 1
-    return 0
-}
-
-stop_reader() {
-    if reader_running; then
-        kill "$(cat "$READER_PIDFILE")" 2>/dev/null
-        rm -f "$READER_PIDFILE"
-    fi
-    pkill -f "opera-proxy.log.fifo" 2>/dev/null
-    rm -f "$FIFO"
-}
-
-daemon_cmd() {
-    # $@ = полная команда запуска (например: /opt/sbin/opera-proxy $OPTIONS).
-    # Вызов должен быть с перенаправлениями вне функции, например:
-    #   daemon_cmd "$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1 &
-    # Перенаправления наследуются через exec, pid пишется из $!.
-    # Запуск в собственной сессии (setsid) — защита от SIGHUP при закрытии
-    # SSH-терминала и от рассылки сигналов группе процессов shell.
-    if command -v setsid >/dev/null 2>&1; then
-        setsid sh -c 'exec "$0" "$@"' "$@" &
-    else
-        trap '' HUP
-        "$@" &
-    fi
-    echo $! > "$PIDFILE"
-}
-
-do_start() {
-    is_running && { echo "$NAME уже запущен (pid $(cat $PIDFILE))"; return 0; }
-    load_conf
-    if [ "$LOG_TO_SYSLOG" = "yes" ]; then
-        # Демон пишется в FIFO; читатель FIFO → syslog живёт отдельно от демона.
-        # Сам демон НЕ стоит в конвейере — сигналы stop/restart доходят чисто
-        # (исправление "Server terminated ... interrupt signal received").
-        start_reader
-        if [ -p "$FIFO" ]; then
-            daemon_cmd "$DAEMON" $OPTIONS </dev/null >"$FIFO" 2>&1 &
-        else
-            daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &
-        fi
-    else
-        stop_reader
-        daemon_cmd "$DAEMON" $OPTIONS </dev/null >/dev/null 2>&1 &
-    fi
-    _i=0
-    while [ $_i -lt 5 ]; do
-        sleep 1
-        _pid=$(cat "$PIDFILE" 2>/dev/null)
-        if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
-            echo "$NAME запущен (pid $_pid)"
-            t2s_up
-            return 0
-        fi
-        _i=$((_i + 1))
-    done
-    rm -f "$PIDFILE"
-    echo "ОШИБКА: $NAME не запустился"
-    return 1
-}
-
-do_stop() {
-    if is_running; then
-        # Корректный graceful shutdown: SIGTERM (Go-демон перехватывает его и
-        # пишет "Shutting down..."), затем при необходимости SIGKILL.
-        kill "$(cat "$PIDFILE")" 2>/dev/null
-        sleep 1
-        is_running && kill -9 "$(cat "$PIDFILE")" 2>/dev/null
-        rm -f "$PIDFILE"
-    fi
-    pidof "$NAME" >/dev/null 2>&1 && pkill -x "$NAME" 2>/dev/null
-    stop_reader
-    t2s_down
-    echo "$NAME остановлен"
-}
-
-case "$1" in
-    start)   do_start ;;
-    stop)    do_stop ;;
-    restart) do_stop; sleep 1; do_start ;;
-    status)
-        if is_running || pidof "$NAME" >/dev/null 2>&1; then
-            echo "$NAME запущен (pid $(pidof $NAME))"
-        else
-            echo "$NAME остановлен"
-            exit 3
-        fi ;;
-    *)  echo "Использование: $0 {start|stop|restart|status}"
-        exit 1 ;;
-esac
-exit $?
-WRAPEOF
-  chmod 755 "$1"
-}
-
-ensure_syslog_logging() {
-  if [ ! -f "$OP_INIT" ] && [ ! -x "$OP_INIT" ]; then
-    echo "   ⚠ Init-скрипт $OP_INIT не найден — создаю новый"
-  fi
-  if init_has_logger; then
-    echo "   ✓ Логирование в syslog уже настроено ($OP_INIT)"
-  else
-    cp "$OP_INIT" "${OP_INIT}.bak.$(date +%s)" 2>/dev/null || true
-    write_syslog_init_wrapper "$OP_INIT" \
-      || { echo "   ❌ Не удалось записать $OP_INIT"; return 1; }
-    echo "   ✓ Установлена logger-обёртка в $OP_INIT (backup: ${OP_INIT}.bak.*)"
-  fi
-  # Переменная конфига, включающая логирование
-  if [ -f "$OP_CONF_FILE" ] && ! grep -q '^LOG_TO_SYSLOG=' "$OP_CONF_FILE" 2>/dev/null; then
-    printf '\n# Логи opera-proxy в системный журнал Keenetic (да/нет)\nLOG_TO_SYSLOG="yes"\n' >> "$OP_CONF_FILE" \
-      && echo "   ✓ В конфиг добавлена LOG_TO_SYSLOG=\"yes\""
-  fi
-  echo ""
-  echo "   Важно: обёртка вступает в силу только после ПЕРЕЗАПУСКА сервиса"
-  echo "   (старый процесс продолжает работать без перенаправления вывода)."
-  _restart_ans=$(yes_no "   Перезапустить сервис сейчас ($OP_INIT restart)? [Y/n]: " "y")
-  if [ "$_restart_ans" = "1" ]; then
-    rebuild_options 2>/dev/null || true
-    "$OP_INIT" restart
-    sleep 2
-    "$OP_INIT" status
-    echo ""
-    echo "   Проверка: выполните в консоли роутера:"
-    echo "     logger -t opera-proxy 'ТЕСТ: проверка журнала'"
-    echo "   и откройте Мониторинг → Журнал — строка должна появиться сразу."
-  else
-    echo "   Не забудьте: $OP_INIT restart"
-  fi
-}
 
 config_menu() {
   print_banner
@@ -2117,7 +1853,8 @@ config_menu() {
 
   if [ ! -f "$OP_CONF_FILE" ]; then
     printf "⚠ Конфиг %b не найден.\n" "$OP_CONF_FILE"
-    if [ "$(yes_no "Создать конфиг по умолчанию? [Y/n]: " "y")" = "1" ]; then
+    yes_no "Создать конфиг по умолчанию? [Y/n]: " "y"
+    if [ "$YESNO" = "1" ]; then
       printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE" \
         && printf '%b✓ Создан: %s%b\n' "$green" "$OP_CONF_FILE" "$reset" \
         || { printf '%b❌ Не удалось записать %s%b\n' "$red" "$OP_CONF_FILE" "$reset"; return 1; }
@@ -2168,7 +1905,6 @@ config_menu() {
     echo "  [7] Изменить VERBOSITY"
     echo "  [8] Изменить API_PROXY (socks5-апстрим)"
     echo "  [l] Показать конфиг целиком"
-    echo "  [g] Логирование в журнал Keenetic (syslog/logger)"
     echo "  [s] Сохранить + перезапустить сервис"
     echo "  [x] Сбросить к конфигу по умолчанию"
     echo "  [0] Выход из настройки"
@@ -2176,7 +1912,8 @@ config_menu() {
     printf '%b\n' "${light_blue}OPTIONS пересобирается автоматически при каждом изменении${reset}"
     echo ""
 
-    _cc=$(ask "Выбор [1-8 / l / g / s / x / 0]: " "0")
+ask "Выбор [1-8 / l / s / x / 0]: " "0"
+_cc=$REPLY
     case "$_cc" in
       1)
         echo ""
@@ -2185,7 +1922,8 @@ config_menu() {
         echo "  [2] AS (Азия)"
         echo "  [3] AM (Америка)"
         echo "  [0] Отмена"
-        _v=$(ask "Ваш выбор [текущий: $_country]: " "")
+        ask "Ваш выбор [текущий: $_country]: " ""
+        _v=$REPLY
         case "$_v" in
           1|EU|eu|Европа) _vu="EU" ;;
           2|AS|as|Азия)   _vu="AS" ;;
@@ -2198,7 +1936,8 @@ config_menu() {
         sleep 1
         ;;
       2)
-        _v=$(ask "BIND_ADDR [$_bindaddr] (127.0.0.1 — только роутер, 0.0.0.0 — вся сеть): " "$_bindaddr")
+        ask "BIND_ADDR [$_bindaddr] (127.0.0.1 — только роутер, 0.0.0.0 — вся сеть): " "$_bindaddr"
+        _v=$REPLY
         case "$_v" in
           *[!0-9.]*|"") printf '%b⚠ Похоже, это не IPv4-адрес%b\n' "$red" "$reset" ;;
           *) conf_set BIND_ADDR "$_v"; rebuild_options; printf '%b✓ BIND_ADDR = %s%b\n' "$green" "$_v" "$reset" ;;
@@ -2206,7 +1945,8 @@ config_menu() {
         sleep 1
         ;;
       3)
-        _v=$(ask "BIND_PORT [$_bindport]: " "$_bindport")
+        ask "BIND_PORT [$_bindport]: " "$_bindport"
+        _v=$REPLY
         case "$_v" in
           ''|*[!0-9]*) printf '%b⚠ Порт должен быть числом%b\n' "$red" "$reset" ;;
           *) if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ] 2>/dev/null; then
@@ -2219,7 +1959,8 @@ config_menu() {
                  echo ""
                  printf '%b⚠ Интерфейс %s (%s) сейчас настроен на 127.0.0.1:%s, а прокси будет слушать :%s%b\n' \
                    "$yellow" "$IFACE" "$_t2s3" "${_t2sport:-—}" "$_v" "$reset"
-                 if [ "$(yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_v} и перезапустить сервис? [y/N]: " "y")" = "1" ]; then
+                 yes_no "   Исправить upstream $IFACE на 127.0.0.1:${_v} и перезапустить сервис? [y/N]: " "y"
+    if [ "$YESNO" = "1" ]; then
                    if command -v ndmc >/dev/null 2>&1; then
                      echo "→ ndmc: interface $IFACE proxy upstream 127.0.0.1 ${_v} ..."
                      ndmc -c "interface $IFACE proxy upstream 127.0.0.1 ${_v}" 2>/dev/null || true
@@ -2246,13 +1987,15 @@ config_menu() {
         sleep 2
         ;;
       4)
-        _v=$(ask "OBFUSCATE yes/no [$_obf]: " "$_obf")
+        ask "OBFUSCATE yes/no [$_obf]: " "$_obf"
+        _v=$REPLY
         case "$_v" in
           y|Y|yes|YES|д|Д) conf_set OBFUSCATE "yes"; printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset" ;;
           n|N|no|NO|нет)   conf_set OBFUSCATE "no";  printf '%b✓ OBFUSCATE = no%b\n' "$green" "$reset" ;;
           *) printf '%b⚠ Нужно yes или no%b\n' "$red" "$reset" ;;
         esac
-        _v=$(ask "FAKE_SNI [$_sni]: " "$_sni")
+        ask "FAKE_SNI [$_sni]: " "$_sni"
+        _v=$REPLY
         if [ -n "$_v" ]; then
           conf_set FAKE_SNI "$_v"; printf '%b✓ FAKE_SNI = %s%b\n' "$green" "$_v" "$reset"
         fi
@@ -2260,7 +2003,8 @@ config_menu() {
         sleep 1
         ;;
       5)
-        _v=$(ask "BOOTSTRAP_DNS [$_doh]: " "$_doh")
+        ask "BOOTSTRAP_DNS [$_doh]: " "$_doh"
+        _v=$REPLY
         case "$_v" in
           https://*) conf_set BOOTSTRAP_DNS "$_v"; rebuild_options; printf '%b✓ BOOTSTRAP_DNS обновлён%b\n' "$green" "$reset" ;;
           *) printf '%b⚠ Значение должно начинаться с https://%b\n' "$red" "$reset" ;;
@@ -2268,7 +2012,8 @@ config_menu() {
         sleep 1
         ;;
       6)
-        _v=$(ask "SERVER_SELECT random/fastest [$_srvsel]: " "$_srvsel")
+        ask "SERVER_SELECT random/fastest [$_srvsel]: " "$_srvsel"
+        _v=$REPLY
         case "$_v" in
           random|fastest) conf_set SERVER_SELECT "$_v"; rebuild_options; printf '%b✓ SERVER_SELECT = %s%b\n' "$green" "$_v" "$reset" ;;
           *) printf '%b⚠ Нужно random или fastest%b\n' "$red" "$reset" ;;
@@ -2285,7 +2030,8 @@ config_menu() {
         echo "  [5] 50 — critical  (только критические)"
         echo "  [6] 60 — silent    (полное отсутствие вывода)"
         echo "  [0] Отмена"
-        _v=$(ask "Ваш выбор [текущий: $_verb]: " "")
+        ask "Ваш выбор [текущий: $_verb]: " ""
+        _v=$REPLY
         case "$_v" in
           1|10) _vu="10" ;;
           2|20) _vu="20" ;;
@@ -2298,16 +2044,6 @@ config_menu() {
         esac
         conf_set VERBOSITY "$_vu"; rebuild_options
         printf '%b✓ VERBOSITY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in 10) echo debug;; 20) echo info;; 30) echo warn;; 40) echo error;; 50) echo critical;; 60) echo silent;; esac)" "$reset"
-        # Логи opera-proxy пишутся в stderr; чтобы они попадали в журнал Keenetic,
-        # нужен logger. Проверяем init-скрипт и при необходимости включаем обёртку.
-        if ! init_has_logger; then
-          echo ""
-          printf '%b⚠ В журнале Keenetic логов не будет: rc.func не перенаправляет вывод процесса.%b\n' "$yellow" "$reset"
-          if [ "$(yes_no "   Включить логирование в syslog (logger -t opera-proxy)? [Y/n]: " "y")" = "1" ]; then
-            ensure_syslog_logging \
-              && echo "   После включения выполните [s] (сохранить + перезапустить сервис)."
-          fi
-        fi
         sleep 1
         ;;
       8)
@@ -2324,10 +2060,12 @@ config_menu() {
         echo "  [2] Запустить подбор рабочего socks5 из публичных списков"
         echo "  [3] Отключить API_PROXY"
         echo "  [0] Отмена"
-        _v=$(ask "Ваш выбор: " "")
+        ask "Ваш выбор: " ""
+        _v=$REPLY
         case "$_v" in
           1)
-            _p=$(ask "   IP:PORT нового апстрима [текущий: ${_api:-без изменений}]: " "")
+            ask "   IP:PORT нового апстрима [текущий: ${_api:-без изменений}]: " ""
+            _p=$REPLY
             # допускаем ввод с префиксом socks5://
             _p=$(printf '%s' "$_p" | sed 's#^socks5://##;s/^[[:space:]]*//;s/[[:space:]]*$//')
             if [ -z "$_p" ]; then
@@ -2341,7 +2079,8 @@ config_menu() {
                 printf '%b✓ API_PROXY = socks5://%s (прокси отвечает, OPTIONS пересобран)%b\n' "$green" "$_p" "$reset"
               else
                 printf '%b⚠ Прокси %s не отвечает (HTTP и HTTPS через него недоступны).%b\n' "$yellow" "$_p" "$reset"
-                if [ "$(yes_no "   Всё равно сохранить? [y/N]: " "n")" = "1" ]; then
+                yes_no "   Всё равно сохранить? [y/N]: " "n"
+    if [ "$YESNO" = "1" ]; then
                   conf_set_api_proxy "$_p"
                   printf '%b✓ API_PROXY = socks5://%s (сохранено без проверки)%b\n' "$green" "$_p" "$reset"
                 else
@@ -2352,12 +2091,14 @@ config_menu() {
             ;;
           2)
             echo "   Подбор может занять несколько минут (скачивание списков + перебор)."
-            if [ "$(yes_no "   Продолжить? [Y/n]: " "y")" = "1" ]; then
+            yes_no "   Продолжить? [Y/n]: " "y"
+    if [ "$YESNO" = "1" ]; then
               if pick_socks5_pool 80 1; then
                 _pick=$(head -1 /tmp/opera-s5-found 2>/dev/null)
                 if [ -n "$_pick" ]; then
                   printf '%b   ✓ Найден рабочий: socks5://%s%b\n' "$green" "$_pick" "$reset"
-                  if [ "$(yes_no "   Применить (записать в конфиг и перезапустить сервис)? [Y/n]: " "y")" = "1" ]; then
+                  yes_no "   Применить (записать в конфиг и перезапустить сервис)? [Y/n]: " "y"
+                  if [ "$YESNO" = "1" ]; then
                     conf_set_api_proxy "$_pick"
                     printf '%b✓ API_PROXY = socks5://%s (OPTIONS пересобран)%b\n' "$green" "$_pick" "$reset"
                     if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
@@ -2378,9 +2119,12 @@ config_menu() {
           3)
             if [ -z "$_api" ]; then
               echo "   API_PROXY и так не задан."
-            elif [ "$(yes_no "   Отключить API_PROXY (удалить -api-proxy из OPTIONS)? [y/N]: " "n")" = "1" ]; then
-              conf_set_api_proxy ""
-              printf '%b✓ API_PROXY отключён (OPTIONS пересобран). Перезапустите сервис: [s] или п.[5].%b\n' "$green" "$reset"
+            else
+              yes_no "   Отключить API_PROXY (удалить -api-proxy из OPTIONS)? [y/N]: " "n"
+              if [ "$YESNO" = "1" ]; then
+                conf_set_api_proxy ""
+                printf '%b✓ API_PROXY отключён (OPTIONS пересобран). Перезапустите сервис: [s] или п.[5].%b\n' "$green" "$reset"
+              fi
             fi
             ;;
           0)
@@ -2399,24 +2143,6 @@ config_menu() {
         printf '%b\n' "${light_blue}──────────────────────────${reset}"
         ask "Нажмите Enter для возврата... " ""
         ;;
-      g|G)
-        echo ""
-        printf '%b\n' "${light_blue}───── Логирование в журнал Keenetic (syslog) ─────${reset}"
-        ensure_syslog_logging
-        if init_has_logger; then
-          echo ""
-          echo "Просмотр логов:"
-          echo "  • Веб-интерфейс: Мониторинг → Журнал (фильтр 'opera-proxy')"
-          echo "  • Быстрая проверка вывода в журнал (из консоли роутера):"
-          echo "      logger -t opera-proxy 'ТЕСТ: проверка журнала'"
-          echo "    строка должна появиться в Журнале сразу."
-          echo "  • Если записей нет — проверьте, что обёртка активна и сервис перезапущен:"
-          echo "      head -3 $OP_INIT          # должна быть строка 'menu-opera syslog wrapper'"
-          echo "      $OP_INIT restart && $OP_INIT status"
-          echo "      ps | grep '[o]pera-proxy' # процесс должен висеть в конвейере с logger"
-        fi
-        ask "Нажмите Enter для возврата... " ""
-        ;;
       s|S)
         # Изменения уже сохранены на лету через conf_set; OPTIONS пересобран автоматически.
         rebuild_options
@@ -2430,7 +2156,8 @@ config_menu() {
         sleep 2
         ;;
       x|X)
-        if [ "$(yes_no "Сбросить конфиг к значениям по умолчанию? [y/N]: " "n")" = "1" ]; then
+        yes_no "Сбросить конфиг к значениям по умолчанию? [y/N]: " "n"
+    if [ "$YESNO" = "1" ]; then
           cp "$OP_CONF_FILE" "$OP_CONF_FILE.bak.$(date +%s)" 2>/dev/null
           printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE" \
             && printf '%b✓ Конфиг сброшен (backup сохранён рядом).%b\n' "$green" "$reset" \
@@ -2464,7 +2191,8 @@ remove_opera_proxy() {
     _cur=$(opkg list-installed 2>/dev/null | awk '/^opera-proxy /{print $3; exit}')
     echo "Будет удалён пакет: opera-proxy (${_cur:-?})"
     echo ""
-    if [ "$(yes_no "Удалить opera-proxy? [y/N]: " "n")" != "1" ]; then
+    yes_no "Удалить opera-proxy? [y/N]: " "n"
+    if [ "$YESNO" != "1" ]; then
       echo "Отменено."
       return 0
     fi
@@ -2508,7 +2236,8 @@ remove_opera_proxy() {
     echo "Найден репозиторий: $REPO_CONF"
     cat "$REPO_CONF" 2>/dev/null | sed 's/^/   /'
     echo ""
-    if [ "$(yes_no "Удалить репозиторий sw.ext.io? [y/N]: " "n")" = "1" ]; then
+    yes_no "Удалить репозиторий sw.ext.io? [y/N]: " "n"
+    if [ "$YESNO" = "1" ]; then
       rm -f "$REPO_CONF"
       echo "✅ Репозиторий удалён"
     else
@@ -2522,7 +2251,8 @@ remove_opera_proxy() {
   # Опционально: fix-скрипт и cron
   if [ -f /opt/fix_opera_tunnel.sh ] || [ -f /opt/etc/cron.hourly/fix_opera_tunnel ]; then
     echo ""
-    if [ "$(yes_no "Удалить fix-скрипт и cron-задачу? [y/N]: " "n")" = "1" ]; then
+    yes_no "Удалить fix-скрипт и cron-задачу? [y/N]: " "n"
+    if [ "$YESNO" = "1" ]; then
       rm -f /opt/fix_opera_tunnel.sh
       rm -f /opt/etc/cron.hourly/fix_opera_tunnel
       echo "✅ Fix-скрипт и cron удалены"
@@ -2619,7 +2349,8 @@ update_menu_script() {
     chmod +x "$DEST"
     echo "✅ Скрипт обновлён: $DEST"
     echo ""
-    if [ "$(yes_no "Перезапустить меню сейчас? [Y/n]: " "y")" = "1" ]; then
+    yes_no "Перезапустить меню сейчас? [Y/n]: " "y"
+    if [ "$YESNO" = "1" ]; then
       echo "→ Перезапуск..."
       exec sh "$DEST"
     fi
@@ -2652,7 +2383,8 @@ run_menu() {
     echo "  [0]  Выход"
     echo ""
 
-    choice=$(ask "Выбор [0-7 / 88 / 99], Enter = выход: " "0")
+    ask "Выбор [0-7 / 88 / 99], Enter = выход: " "0"
+    choice=$REPLY
     case "$choice" in
       1)
         install_opera_menu
