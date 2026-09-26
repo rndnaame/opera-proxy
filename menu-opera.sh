@@ -10,7 +10,8 @@
 
 #   1.3.11 — убраны мёртвые хвосты: ARCH_REPO, HL_UPD/HL_RST, OP_CONF
 #   1.3.12 — [5] API_PROXY: geo через ip-api.com вместо ipinfo.io
-MENU_VERSION="1.3.12"
+#   1.3.13 — [5] API_PROXY: в geo добавлен country (IP, CC, Country, City)
+MENU_VERSION="1.3.13"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1622,27 +1623,34 @@ socks5_alive() {
   return 1
 }
 
-# Через socks5h: ip-api.com → печатает "IP (CC, City)" или только IP; код 0 = OK
-# Пример: 185.195.71.218 (CH, Hünenberg)
+# Через socks5h: ip-api.com → "IP (CC, Country, City)"; код 0 = OK
+# Пример: 185.195.71.218 (CH, Switzerland, Hünenberg)
 socks5_ipinfo() {
   _sp="$1"
-  # free API: только HTTP; JSON: query, countryCode, city
-  _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s "http://ip-api.com/json/?fields=status,message,query,countryCode,city" 2>/dev/null)
-  [ -z "$_j" ] && _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s "http://ip-api.com/json/" 2>/dev/null)
+  _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s \
+    "http://ip-api.com/json/?fields=status,message,query,country,countryCode,city" 2>/dev/null)
+  [ -z "$_j" ] && _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s \
+    "http://ip-api.com/json/" 2>/dev/null)
   [ -z "$_j" ] && return 1
-  # status != success → ошибка API
   echo "$_j" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"' || return 1
   _ip=$(printf '%s' "$_j" | sed -n 's/.*"query"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   _cc=$(printf '%s' "$_j" | sed -n 's/.*"countryCode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  _country=$(printf '%s' "$_j" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   _city=$(printf '%s' "$_j" | sed -n 's/.*"city"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$_ip" ]; then
     _ip=$(printf '%s' "$_j" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
   fi
   [ -z "$_ip" ] && return 1
-  if [ -n "$_cc" ] && [ -n "$_city" ]; then
-    printf '%s (%s, %s)' "$_ip" "$_cc" "$_city"
-  elif [ -n "$_cc" ]; then
-    printf '%s (%s)' "$_ip" "$_cc"
+  _geo=""
+  [ -n "$_cc" ] && _geo="$_cc"
+  if [ -n "$_country" ]; then
+    [ -n "$_geo" ] && _geo="$_geo, $_country" || _geo="$_country"
+  fi
+  if [ -n "$_city" ]; then
+    [ -n "$_geo" ] && _geo="$_geo, $_city" || _geo="$_city"
+  fi
+  if [ -n "$_geo" ]; then
+    printf '%s (%s)' "$_ip" "$_geo"
   else
     printf '%s' "$_ip"
   fi
