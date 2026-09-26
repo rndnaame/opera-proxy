@@ -11,7 +11,8 @@
 #   1.3.11 — убраны мёртвые хвосты: ARCH_REPO, HL_UPD/HL_RST, OP_CONF
 #   1.3.12 — [5] API_PROXY: geo через ip-api.com вместо ipinfo.io
 #   1.3.13 — [5] API_PROXY: в geo добавлен country (IP, CC, Country, City)
-MENU_VERSION="1.3.13"
+#   1.3.14 — [6][8]: [3] Проверить API_PROXY, [4] Отключить
+MENU_VERSION="1.3.14"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1944,7 +1945,8 @@ _cc=$REPLY
         echo "Выберите действие:"
         echo "  [1] Задать вручную (IP:PORT)"
         echo "  [2] Запустить подбор рабочего socks5 из публичных списков"
-        echo "  [3] Отключить API_PROXY"
+        echo "  [3] Проверить API_PROXY"
+        echo "  [4] Отключить API_PROXY"
         echo "  [0] Отмена"
         ask "Ваш выбор: " ""
         _v=$REPLY
@@ -2004,6 +2006,22 @@ _cc=$REPLY
             ;;
           3)
             if [ -z "$_api" ]; then
+              echo "   API_PROXY не задан — проверять нечего."
+            else
+              echo "→ Проверка socks5://$_api ..."
+              _info=$(socks5_ipinfo "$_api")
+              if [ -n "$_info" ]; then
+                printf '%b✓ API_PROXY OK%b  %s\n' "$green" "$reset" "$_info"
+              elif socks5_alive "$_api"; then
+                printf '%b✓ API_PROXY отвечает%b  (ip-api недоступен, прокси жив)\n' "$green" "$reset"
+              else
+                printf '%b✗ API_PROXY не отвечает%b  socks5://%s\n' "$red" "$reset" "$_api"
+                echo "   Можно подобрать новый ([2]) или отключить ([4])."
+              fi
+            fi
+            ;;
+          4)
+            if [ -z "$_api" ]; then
               echo "   API_PROXY и так не задан."
             else
               yes_no "   Отключить API_PROXY (удалить -api-proxy из OPTIONS)? [y/N]: " "n"
@@ -2017,7 +2035,7 @@ _cc=$REPLY
             echo "   Отменено."
             ;;
           *)
-            printf '%b⚠ Неверный выбор: %s (нужно 1-3 или 0)%b\n' "$red" "$_v" "$reset"
+            printf '%b⚠ Неверный выбор: %s (нужно 1-4 или 0)%b\n' "$red" "$_v" "$reset"
             ;;
         esac
         sleep 2
