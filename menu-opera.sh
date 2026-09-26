@@ -9,7 +9,7 @@
 #   curl -sL https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh | sh
 #
 # История версий:
-#   1.1.6 — пункт [6]: сверка порта SOCKS (конфиг/процесс/t2sN), тест по фактическому
+#   1.1.6 — пункт [5]: сверка порта SOCKS (конфиг/процесс/t2sN), тест по фактическому
 #           порту, предложение исправить порт t2s + перезапуск сервиса и повторный тест
 #   1.1.7 — дефолтный порт везде 18080; пункт [7] при смене BIND_PORT проверяет/синхронизирует upstream t2sN
 #   1.1.8 — пункт [7]: выбор COUNTRY и VERBOSITY через нумерованное подменю
@@ -36,22 +36,22 @@
 #   1.2.4 — исправлены уровни VERBOSITY по справке opera-proxy:
 #           10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent (без вывода);
 #           подменю выбора расширено до [1]-[6], добавлены описания 50/60
-#   1.2.5 — пункт [6]: если хотя бы одна проверка прошла, а t2sN DOWN —
+#   1.2.5 — пункт [5]: если хотя бы одна проверка прошла, а t2sN DOWN —
 #           предложить поднять интерфейс (ndmc up) и повторить проверку заново
-#   1.2.6 — пункт [6]: компактный вывод — убраны блоки «Параметры opera-proxy» и
+#   1.2.6 — пункт [5]: компактный вывод — убраны блоки «Параметры opera-proxy» и
 #           разделители секций; статусы в одну таблице; IP-сервисы показывают
 #           IP прямо в строке теста; полный cmdline процесса — по флагу -v
-#   1.2.7 — пункт [6]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
+#   1.2.7 — пункт [5]: убран запрос «Подробный вывод? [y/N]» (лишнее действие);
 #           полный cmdline — только по флагу запуска: ./menu-opera.sh 6 -v;
 #           перенос cmdline без fold (нет в Entware/BusyBox) — awk, фолбэк sed
-#   1.2.9 — исправление 1.2.8: в пункте [6] тесты выполнялись СРАЗУ после «ndmc up»
+#   1.2.9 — исправление 1.2.8: в пункте [5] тесты выполнялись СРАЗУ после «ndmc up»
 #           и restart, до фактического поднятия туннеля — первый проход давал 0/4
 #           и лишний повторный вывод. Теперь: (1) порядок «up → save → restart»;
 #           (2) ожидание реального UP интерфейса (до ~15 с); (3) ожидание старта
 #           прослушивания SOCKS-порта; (4) если после исправлений тесты не прошли —
 #           результат показывается один раз (без дублирующего блока), при UP-туннеле
 #           даётся подсказка обождать и повторить п.6.
-#   1.2.10 — пункт [6]: убран повторный прогон тестов. Исправления (порт upstream,
+#   1.2.10 — пункт [5]: убран повторный прогон тестов. Исправления (порт upstream,
 #           up туннеля, restart) применяются ДО тестов, после ожидания UP/порта
 #           тесты выполняются ровно ОДИН раз — без заголовков «ПОВТОРНАЯ ПРОВЕРКА»
 #           и задублированного вывода (регрессия 1.2.8/1.2.9).
@@ -83,7 +83,7 @@
 #           "Server terminated with a reason: interrupt signal received" больше
 #           не возникают, даже если терминал SSH закрывается или shell рассылает
 #           сигналы группе процессов; stop по-прежнему шлёт SIGTERM (graceful).
-#   1.2.14 — пункт [6]: проверка API_PROXY: если в cmdline запущенного процесса
+#   1.2.14 — пункт [5]: проверка API_PROXY: если в cmdline запущенного процесса
 #           есть -api-proxy socks5://IP:PORT — строка «API : socks5://...» в шапке
 #           и дополнительный тест доступности внешнего SOCKS5 (итог N/5).
 #           Без -api-proxy вывод как раньше (N/4).
@@ -91,14 +91,14 @@
 #           определение функции curl_get() перенесено в начало скрипта (до всех
 #           вызывающих её функций) — теперь она гарантированно доступна из
 #           конвейеров/подоболочек в любом POSIX-шелле (ash на Keenetic).
-#   1.2.8 — пункт [6]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
+#   1.2.8 — пункт [5]: все неисправности (расхождение порта t2sN + DOWN интерфейс)
 #           обнаруживаются ДО тестов и чинятся за один проход: upstream -> up ->
 #           save -> restart -> повторный тест (раньше port-fix и iface-up шли
 #           двумя отдельными проходами с промежуточным прогоном всех тестов)
 #   1.1.5 — пункт [7]: буквы a-g → цифры 1-7, OPTIONS пересобирается автоматически
 #   1.1.4 — новый пункт [7]: настройка конфига (просмотр + изменение параметров)
-#   1.1.3 — пункт [6]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
-#   1.1.2 — пункт [6]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
+#   1.1.3 — пункт [5]: убран вывод конфига, добавлена 4-я проверка google.com через t2S
+#   1.1.2 — пункт [5]: проверка прокси через локальный SOCKS5 (127.0.0.1) вместо t2S
 #   1.1.0 — conf SNI/DoH/COUNTRY, умный ProxyX, удаление по description, t2sN
 #   1.0.0 — базовое меню: install/UPX/Fix/check/remove/[99]
 #   1.2.19 — CTRL+C / setsid в старом wrapper
@@ -109,7 +109,11 @@
 #   1.3.2 — ask/yes_no без $(…): один процесс меню в ps (не subshell)
 #   1.3.3 — оптимизация: единый conf-шаблон, BIND_ADDR=127.0.0.1 везде,
 #           detect_installed без хардкода t2s0
-MENU_VERSION="1.3.3"
+#   1.3.4 — [6] API_PROXY: та же проверка, что [7] (socks5h + ipify), без ложного FAIL
+#   1.3.5 — [6] API_PROXY через ipinfo.io: OK  IP (CC, City)
+#   1.3.6 — убран пункт [3] Обновление Bin из GitHub
+#   1.3.7 — нумерация меню: Fix/сервис/проверка/конфиг → [3]–[6]
+MENU_VERSION="1.3.7"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -692,111 +696,14 @@ upgrade_opera_proxy() {
   echo "=== Готово ==="
 }
 
-# ---------------------------------------------------------------------------
-# [3] Обновление Bin Opera-Proxy из GitHub
-# ---------------------------------------------------------------------------
-update_opera_bin() {
-  print_banner
-  printf '%b\n' "${bold}[3] Обновление opera-proxy из GitHub${reset}"
-  echo ""
 
-  INSTALL_PATH="/opt/sbin/opera-proxy"
-  if [ ! -f "$INSTALL_PATH" ]; then
-    echo "❌ opera-proxy не найден. Обновление отменено."
-    return 1
-  fi
-
-  CURRENT=$("$INSTALL_PATH" -version 2>/dev/null | head -n1 || echo "unknown")
-  echo "Найден: $INSTALL_PATH (текущая: $CURRENT)"
-
-  LATEST=$(curl -s -I -L https://github.com/Alexey71/opera-proxy/releases/latest 2>/dev/null \
-    | grep -oE "tag/v?[0-9.]+" | head -n1 | sed "s/tag\///")
-  [ -z "$LATEST" ] && LATEST=$(wget -q -O - --spider https://github.com/Alexey71/opera-proxy/releases/latest 2>&1 \
-    | grep -oE "tag/v?[0-9.]+" | head -n1 | sed "s/tag\///")
-  echo "Последняя: ${LATEST:-unknown}"
-
-  CURRENT_NORM=${CURRENT#v}
-  LATEST_NORM=${LATEST#v}
-
-  if [ -n "$LATEST_NORM" ] && [ "$CURRENT_NORM" = "$LATEST_NORM" ]; then
-    echo "✅ Версия уже актуальная ($CURRENT)"
-    yes_no "Принудительно обновить? [y/N]: " "n"
-    if [ "$YESNO" != "1" ]; then
-      echo "Обновление отменено."
-      return 0
-    fi
-    echo "🔄 Принудительное обновление..."
-  fi
-
-  echo "🔄 Начинаем обновление..."
-
-  A=$(opkg print-architecture 2>/dev/null | sort -k3 -nr | awk '$2!="all"{print $2;exit}')
-  case $A in
-    aarch64*) ARCH_DL=linux-arm64 ;;
-    mipsel*)  ARCH_DL=linux-mipsle ;;
-    mips*)    ARCH_DL=linux-mips ;;
-    *)
-      echo "❌ Неизвестная архитектура: ${A:-пусто}"
-      return 1
-      ;;
-  esac
-
-  TMP="/tmp/opera-proxy.new"
-  URL="https://github.com/Alexey71/opera-proxy/releases/latest/download/opera-proxy.${ARCH_DL}"
-
-  echo "⬇️ Скачивание $URL ..."
-  rm -f "$TMP"
-  if command -v curl >/dev/null 2>&1; then
-    curl -L -f --connect-timeout 20 -o "$TMP" "$URL" || true
-  fi
-  if [ ! -s "$TMP" ] && command -v wget >/dev/null 2>&1; then
-    wget --timeout=20 -q -O "$TMP" "$URL" || true
-  fi
-  if [ ! -s "$TMP" ]; then
-    echo "❌ Ошибка скачивания"
-    return 1
-  fi
-
-  chmod +x "$TMP"
-
-  yes_no "Сжать UPX? [y/N]: " "n"
-    if [ "$YESNO" = "1" ]; then
-    if ! command -v upx >/dev/null 2>&1; then
-      echo "→ Установка upx ..."
-      opkg update >/dev/null 2>&1 || true
-      opkg install upx >/dev/null 2>&1 || true
-    fi
-    if command -v upx >/dev/null 2>&1; then
-      echo "🔧 Сжатие..."
-      upx --lzma --best "$TMP" 2>/dev/null || true
-    else
-      echo "⚠ upx недоступен, пропускаем сжатие"
-    fi
-  fi
-
-  mv -f "$TMP" "$INSTALL_PATH"
-  echo "✅ Обновлено → $($INSTALL_PATH -version 2>/dev/null | head -n1)"
-
-  echo "🔄 Перезапуск..."
-  /opt/etc/init.d/S99opera-proxy restart 2>/dev/null && echo "Сервис перезапущен" || true
-
-  sleep 5
-  find_opera_iface 2>/dev/null || IFACE="Proxy0"
-  T2S=$(iface_to_t2s "$IFACE")
-  echo "🌐 Проверка $T2S ($IFACE):"
-  curl --interface "$T2S" -s -m 8 2ip.io 2>/dev/null || echo "2ip.io: нет"
-  echo ""
-  curl --interface "$T2S" -s -m 8 ifconfig.co 2>/dev/null || echo "ifconfig.co: нет"
-  echo ""
-  echo "=== Готово ==="
-}
 
 # ---------------------------------------------------------------------------
-# [4] Fix Opera (+socks5)
+# [3] Fix Opera (+socks5)
 # ---------------------------------------------------------------------------
 fix_opera() {
   print_banner
-  printf '%b\n' "${bold}[4] Fix Opera (+socks5)${reset}"
+  printf '%b\n' "${bold}[3] Fix Opera (+socks5)${reset}"
   echo ""
 
   if [ ! -f /opt/etc/init.d/S99opera-proxy ]; then
@@ -1174,10 +1081,10 @@ CRON
 }
 
 # ---------------------------------------------------------------------------
-# [5] Остановить / Запустить сервис
+# [4] Остановить / Запустить сервис
 # ---------------------------------------------------------------------------
 # Управление состоянием t2s-интерфейса Opera из пунктов меню (v1.2.3):
-# интерфейс ищется по upstream-порту (как в п.[6]), фолбэк — description Opera.
+# интерфейс ищется по upstream-порту (как в п.[5]), фолбэк — description Opera.
 menu_iface_num_by_port() {
   # $1 = порт; печатает N для ProxyN, чей upstream = 127.0.0.1:<порт>
   _p="$1"
@@ -1210,7 +1117,7 @@ menu_t2s_set_state() {
 
 toggle_service() {
   print_banner
-  printf '%b\n' "${bold}[5] Управление сервисом opera-proxy${reset}"
+  printf '%b\n' "${bold}[4] Управление сервисом opera-proxy${reset}"
   echo ""
 
   if [ ! -x /opt/etc/init.d/S99opera-proxy ]; then
@@ -1254,7 +1161,7 @@ toggle_service() {
 }
 
 # ---------------------------------------------------------------------------
-# [6] Проверить прокси (через локальный SOCKS5 127.0.0.1)
+# [5] Проверить прокси (через локальный SOCKS5 127.0.0.1)
 # ---------------------------------------------------------------------------
 
 # Порт, на который настроен upstream интерфейса ProxyN (t2sN) в Keenetic
@@ -1274,7 +1181,7 @@ iface_socks_port() {
 check_proxy_run() {
   find_opera_iface 2>/dev/null || IFACE="Proxy0"
   T2S=$(iface_to_t2s "$IFACE")
-  printf '%b\n' "${bold}[6] Проверка прокси через SOCKS5 (127.0.0.1)${reset}"
+  printf '%b\n' "${bold}[5] Проверка прокси через SOCKS5 (127.0.0.1)${reset}"
   echo ""
 
   detect_installed
@@ -1481,7 +1388,7 @@ check_proxy_run() {
   fi
 
   if [ "$_port_ok" = "0" ] && [ "$SVC_RUNNING" != "1" ]; then
-    printf '%b⚠ Локальный SOCKS5 (%s) недоступен — запустите сервис (п.5) или Fix (п.4)%b\n' \
+    printf '%b⚠ Локальный SOCKS5 (%s) недоступен — запустите сервис (п.4) или Fix (п.3)%b\n' \
       "$red" "$LOCAL_SOCKS_CHECK" "$reset"
     echo ""
   fi
@@ -1540,21 +1447,20 @@ check_proxy_run() {
       printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
   esac
 
-  # v1.2.14: проверка API_PROXY (если -api-proxy используется в текущем процессе):
-  # прямой тест доступности внешнего SOCKS5-прокси из cmdline процесса
+  # API_PROXY: socks5h + ipinfo.io (IP, country, city)
   if [ -n "$_api_proc" ]; then
     printf '  %-18s' "API_PROXY:"
-    _code=$(curl --proxy "socks5://$_api_proc" -s -o /dev/null \
-      -w "%{http_code}" -m 10 --connect-timeout 7 https://www.google.com/generate_204 2>/dev/null)
-    case "$_code" in
-      204|200|301|302|303|307|308)
-        printf '%bOK%b  (HTTP %s)\n' "$green" "$reset" "$_code"
-        _ok_count=$((_ok_count + 1)) ;;
-      000|"")
-        printf '%bFAIL%b\n' "$red" "$reset" ;;
-      *)
-        printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
-    esac
+    _info=$(socks5_ipinfo "$_api_proc")
+    if [ -n "$_info" ]; then
+      printf '%bOK%b  %s\n' "$green" "$reset" "$_info"
+      _ok_count=$((_ok_count + 1))
+    elif socks5_alive "$_api_proc"; then
+      # ipinfo недоступен, но прокси жив (ipify)
+      printf '%bOK%b  (ipinfo недоступен, прокси отвечает)\n' "$green" "$reset"
+      _ok_count=$((_ok_count + 1))
+    else
+      printf '%bFAIL%b\n' "$red" "$reset"
+    fi
   fi
 
   # Итоговая сводка
@@ -1565,16 +1471,16 @@ check_proxy_run() {
   elif [ "$_ok_count" -ge 1 ]; then
     printf "  %b! Частично%b  (%s/%s) — возможны проблемы\n" "$yellow" "$reset" "$_ok_count" "$_tests_total"
   else
-    printf "  %b✗ Прокси не отвечает%b  (0/%s)  (Fix — п.4, перезапуск — п.5)\n" "$red" "$reset" "$_tests_total"
+    printf "  %b✗ Прокси не отвечает%b  (0/%s)  (Fix — п.3, перезапуск — п.4)\n" "$red" "$reset" "$_tests_total"
     # v1.2.9: если тесты прогнаны ПОСЛЕ применения исправлений и всё равно 0/4 —
     # повторный полный прогон бессмысленен (дублирует вывод). Даём подсказку.
     if [ "${_fix_applied:-0}" = "1" ] || [ "${_up_iface_applied:-0}" = "1" ]; then
       _fix_applied=0; _up_iface_applied=0   # без дублирующего блока «ПОВТОРНАЯ ПРОВЕРКА»
       if [ "$_up" != "1" ]; then
-        echo "     Туннель $T2S мог ещё не подняться — обождите ~10 с и повторите п.6."
+        echo "     Туннель $T2S мог ещё не подняться — обождите ~10 с и повторите п.5."
       else
-        echo "     Исправления применены, но тесты не прошли — повторите п.6 позже"
-        echo "     или выполните Fix (п.4)."
+        echo "     Исправления применены, но тесты не прошли — повторите п.5 позже"
+        echo "     или выполните Fix (п.3)."
       fi
     fi
   fi
@@ -1582,7 +1488,7 @@ check_proxy_run() {
   echo ""
 }
 
-# Точка входа пункта [6] (v1.2.10): ОДИН проход.
+# Точка входа пункта [5] (v1.2.10): ОДИН проход.
 # Исправления (порт upstream / up туннеля / restart) применяются ДО тестов,
 # затем сразу гоняются тесты — без дублирующего блока «ПОВТОРНАЯ ПРОВЕРКА».
 check_proxy() {
@@ -1594,10 +1500,10 @@ check_proxy() {
 }
 
 # ---------------------------------------------------------------------------
-# [7] Настройка конфига (/opt/etc/opera-proxy.conf)
+# [6] Настройка конфига (/opt/etc/opera-proxy.conf)
 # ---------------------------------------------------------------------------
 
-# Шаблон конфига по умолчанию (параметры редактируются в подменю, п.7)
+# Шаблон конфига по умолчанию (параметры редактируются в подменю, п.6)
 OPERA_CONF_TEMPLATE='# ─────────────────────────────────────────────────────
 #  Конфигурация opera-proxy для Keenetic (SOCKS5)
 #  После изменений: /opt/etc/init.d/S*opera-proxy restart
@@ -1771,6 +1677,30 @@ socks5_alive() {
   return 1
 }
 
+# Через socks5h: ipinfo.io → печатает "IP (CC, City)" или только IP; код 0 = OK
+# Пример: 37.46.196.85 (RO, Bucharest)
+socks5_ipinfo() {
+  _sp="$1"
+  _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s http://ipinfo.io 2>/dev/null)
+  [ -z "$_j" ] && _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s https://ipinfo.io 2>/dev/null)
+  [ -z "$_j" ] && return 1
+  _ip=$(printf '%s' "$_j" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  _cc=$(printf '%s' "$_j" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  _city=$(printf '%s' "$_j" | sed -n 's/.*"city"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  if [ -z "$_ip" ]; then
+    _ip=$(printf '%s' "$_j" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+  fi
+  [ -z "$_ip" ] && return 1
+  if [ -n "$_cc" ] && [ -n "$_city" ]; then
+    printf '%s (%s, %s)' "$_ip" "$_cc" "$_city"
+  elif [ -n "$_cc" ]; then
+    printf '%s (%s)' "$_ip" "$_cc"
+  else
+    printf '%s' "$_ip"
+  fi
+  return 0
+}
+
 # Подбор рабочего socks5 из публичных списков (как в Fix, но упрощённо).
 # Аргументы: MAX_TEST (по умолчанию 80), NEED — сколько рабочих найти (по умолчанию 1).
 # Пишет найденные "IP:PORT" построчно в /tmp/opera-s5-found
@@ -1848,7 +1778,7 @@ pick_socks5_pool() {
 
 config_menu() {
   print_banner
-  printf '%b\n' "${bold}[7] Настройка конфига${reset}"
+  printf '%b\n' "${bold}[6] Настройка конфига${reset}"
   echo ""
 
   if [ ! -f "$OP_CONF_FILE" ]; then
@@ -1865,7 +1795,7 @@ config_menu() {
 
   while true; do
     print_banner
-    printf '%b\n' "${bold}[7] Настройка конфига${reset}  ${light_blue}$OP_CONF_FILE${reset}"
+    printf '%b\n' "${bold}[6] Настройка конфига${reset}  ${light_blue}$OP_CONF_FILE${reset}"
     echo ""
 
     # Текущие значения (с дефолтами, если чего-то нет в conf)
@@ -1972,7 +1902,7 @@ _cc=$REPLY
                    if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
                      echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
                      /opt/etc/init.d/S99opera-proxy restart 2>/dev/null || true
-                     printf '%b✓ Сервис перезапущен. Проверить можно в пункте [6].%b\n' "$green" "$reset"
+                     printf '%b✓ Сервис перезапущен. Проверить можно в пункте [5].%b\n' "$green" "$reset"
                    else
                      printf '%b⚠ S99opera-proxy не найден — изменения сохранены, но сервис не перезапущен.%b\n' "$yellow" "$reset"
                    fi
@@ -2104,14 +2034,14 @@ _cc=$REPLY
                     if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
                       echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
                       /opt/etc/init.d/S99opera-proxy restart
-                      printf '%b✓ Сервис перезапущен. Проверить можно в пункте [6].%b\n' "$green" "$reset"
+                      printf '%b✓ Сервис перезапущен. Проверить можно в пункте [5].%b\n' "$green" "$reset"
                     fi
                   else
                     echo "   Пропущено. Можно применить позже через [s]."
                   fi
                 fi
               else
-                printf '%b⚠ Подбор не дал результата. Можно задать адрес вручную ([1]) или выполнить Fix — п.[4].%b\n' "$yellow" "$reset"
+                printf '%b⚠ Подбор не дал результата. Можно задать адрес вручную ([1]) или выполнить Fix — п.[3].%b\n' "$yellow" "$reset"
               fi
               rm -f /tmp/opera-s5-found
             fi
@@ -2123,7 +2053,7 @@ _cc=$REPLY
               yes_no "   Отключить API_PROXY (удалить -api-proxy из OPTIONS)? [y/N]: " "n"
               if [ "$YESNO" = "1" ]; then
                 conf_set_api_proxy ""
-                printf '%b✓ API_PROXY отключён (OPTIONS пересобран). Перезапустите сервис: [s] или п.[5].%b\n' "$green" "$reset"
+                printf '%b✓ API_PROXY отключён (OPTIONS пересобран). Перезапустите сервис: [s] или п.[4].%b\n' "$green" "$reset"
               fi
             fi
             ;;
@@ -2149,7 +2079,7 @@ _cc=$REPLY
         if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
           echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
           /opt/etc/init.d/S99opera-proxy restart
-          printf '%b✓ Сервис перезапущен. Проверить можно в пункте [6].%b\n' "$green" "$reset"
+          printf '%b✓ Сервис перезапущен. Проверить можно в пункте [5].%b\n' "$green" "$reset"
         else
           printf '%b⚠ /opt/etc/init.d/S99opera-proxy не найден — изменения сохранены, но сервис не перезапущен.%b\n' "$yellow" "$reset"
         fi
@@ -2373,17 +2303,16 @@ run_menu() {
     echo ""
     echo "  [1]  Установить Opera-proxy"
     echo "  [2]  Обновить Opera-proxy (opkg)"
-    echo "  [3]  Обновление Bin Opera-Proxy из GitHub"
-    echo "  [4]  Fix Opera (+socks5)"
-    echo "  [5]  Остановить / Запустить сервис"
-    echo "  [6]  Проверить прокси"
-    echo "  [7]  Настройка конфига"
+    echo "  [3]  Fix Opera (+socks5)"
+    echo "  [4]  Остановить / Запустить сервис"
+    echo "  [5]  Проверить прокси"
+    echo "  [6]  Настройка конфига"
     echo "  [88] Удалить"
     echo "  [99] Обновить скрипт"
     echo "  [0]  Выход"
     echo ""
 
-    ask "Выбор [0-7 / 88 / 99], Enter = выход: " "0"
+    ask "Выбор [0-6 / 88 / 99], Enter = выход: " "0"
     choice=$REPLY
     case "$choice" in
       1)
@@ -2395,22 +2324,18 @@ run_menu() {
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
       3)
-        update_opera_bin
-        ask "Нажмите Enter для возврата в меню... " ""
-        ;;
-      4)
         fix_opera
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      5)
+      4)
         toggle_service
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      6)
+      5)
         check_proxy
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
-      7)
+      6)
         config_menu
         ask "Нажмите Enter для возврата в меню... " ""
         ;;
@@ -2438,10 +2363,10 @@ run_menu() {
 # main
 # ---------------------------------------------------------------------------
 main() {
-  # Аргументы: ./menu-opera.sh [6 [-v]] — сразу запустить проверку прокси; -v = с полным cmdline
+  # Аргументы: ./menu-opera.sh [5 [-v]] — сразу запустить проверку прокси; -v = с полным cmdline
   for _a in "$@"; do
     case "$_a" in
-      6) RUN_ITEM_6=1 ;;
+      5) RUN_ITEM_5=1 ;;
       -v|--verbose|v) CHECK_PROXY_ARG="$_a" ;;
     esac
   done
@@ -2449,7 +2374,7 @@ main() {
   if [ -r /dev/tty ]; then
     exec </dev/tty >/dev/tty 2>/dev/tty
   fi
-  if [ "${RUN_ITEM_6:-0}" = "1" ]; then
+  if [ "${RUN_ITEM_5:-0}" = "1" ]; then
     check_proxy
     ask "Нажмите Enter для возврата в меню... " ""
   fi
