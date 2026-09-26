@@ -1,8 +1,5 @@
 #!/bin/sh
 # Меню управления Opera-Proxy (Keenetic / Entware)
-# Дизайн и архитектура по образцу:
-#   https://github.com/rndnaame/awg-compressed
-#   https://github.com/rndnaame/awg-compressed/blob/main/install-compressed.sh
 #
 # Запуск:
 #   sh menu-opera.sh
@@ -11,7 +8,8 @@
 # История версий: см. README.md (раздел «История версий меню»)
 #   https://github.com/rndnaame/opera-proxy/blob/main/README.md
 
-MENU_VERSION="1.3.10"
+#   1.3.11 — убраны мёртвые хвосты: ARCH_REPO, HL_UPD/HL_RST, OP_CONF
+MENU_VERSION="1.3.11"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -27,12 +25,8 @@ light_blue="\033[96m"
 bold="\033[1m"
 reset="\033[0m"
 
-HL_UPD='\033[1;93m'
-HL_RST='\033[0m'
-
 if [ -n "$NO_COLOR" ]; then
   green=""; red=""; yellow=""; light_blue=""; bold=""; reset=""
-  HL_UPD=""; HL_RST=""
 fi
 
 # Скачать URL; для GitHub — зеркала ghfast / gh-proxy
@@ -97,20 +91,16 @@ print_banner() {
 detect_arch() {
   A=$(opkg print-architecture 2>/dev/null | sort -k3 -nr | awk '$2!="all"{print $2;exit}')
   case "$A" in
-    aarch64*|arm*) ARCH=aarch64; ARCH_REPO="aarch64" ;;
-    mipsel*)       ARCH=mipsel;  ARCH_REPO="mipsel"  ;;
-    mips*)         ARCH=mips;    ARCH_REPO="mips"    ;;
-    *)
-      ARCH=""
-      ARCH_REPO=""
-      ;;
+    aarch64*|arm*) ARCH=aarch64 ;;
+    mipsel*)       ARCH=mipsel ;;
+    mips*)         ARCH=mips ;;
+    *)             ARCH="" ;;
   esac
 }
 
 detect_installed() {
   OP_BIN="/opt/sbin/opera-proxy"
   OP_INIT="/opt/etc/init.d/S99opera-proxy"
-  OP_CONF="/opt/etc/opera-proxy.conf"
   FIX_SCRIPT="/opt/fix_opera_tunnel.sh"
 
   CUR_VER=""
