@@ -9,7 +9,8 @@
 #   https://github.com/rndnaame/opera-proxy/blob/main/README.md
 
 #   1.3.11 — убраны мёртвые хвосты: ARCH_REPO, HL_UPD/HL_RST, OP_CONF
-MENU_VERSION="1.3.11"
+#   1.3.12 — [5] API_PROXY: geo через ip-api.com вместо ipinfo.io
+MENU_VERSION="1.3.12"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1392,7 +1393,7 @@ check_proxy_run() {
       printf '%bHTTP %s%b\n' "$yellow" "$_code" "$reset" ;;
   esac
 
-  # API_PROXY: socks5h + ipinfo.io (IP, country, city)
+  # API_PROXY: socks5h + ip-api.com (IP, countryCode, city)
   if [ -n "$_api_proc" ]; then
     printf '  %-18s' "API_PROXY:"
     _info=$(socks5_ipinfo "$_api_proc")
@@ -1400,8 +1401,7 @@ check_proxy_run() {
       printf '%bOK%b  %s\n' "$green" "$reset" "$_info"
       _ok_count=$((_ok_count + 1))
     elif socks5_alive "$_api_proc"; then
-      # ipinfo недоступен, но прокси жив (ipify)
-      printf '%bOK%b  (ipinfo недоступен, прокси отвечает)\n' "$green" "$reset"
+      printf '%bOK%b  (ip-api недоступен, прокси отвечает)\n' "$green" "$reset"
       _ok_count=$((_ok_count + 1))
     else
       printf '%bFAIL%b\n' "$red" "$reset"
@@ -1622,15 +1622,18 @@ socks5_alive() {
   return 1
 }
 
-# Через socks5h: ipinfo.io → печатает "IP (CC, City)" или только IP; код 0 = OK
-# Пример: 37.46.196.85 (RO, Bucharest)
+# Через socks5h: ip-api.com → печатает "IP (CC, City)" или только IP; код 0 = OK
+# Пример: 185.195.71.218 (CH, Hünenberg)
 socks5_ipinfo() {
   _sp="$1"
-  _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s http://ipinfo.io 2>/dev/null)
-  [ -z "$_j" ] && _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s https://ipinfo.io 2>/dev/null)
+  # free API: только HTTP; JSON: query, countryCode, city
+  _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s "http://ip-api.com/json/?fields=status,message,query,countryCode,city" 2>/dev/null)
+  [ -z "$_j" ] && _j=$(curl -x "socks5h://$_sp" -m 8 --connect-timeout 5 -s "http://ip-api.com/json/" 2>/dev/null)
   [ -z "$_j" ] && return 1
-  _ip=$(printf '%s' "$_j" | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-  _cc=$(printf '%s' "$_j" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  # status != success → ошибка API
+  echo "$_j" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"' || return 1
+  _ip=$(printf '%s' "$_j" | sed -n 's/.*"query"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+  _cc=$(printf '%s' "$_j" | sed -n 's/.*"countryCode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   _city=$(printf '%s' "$_j" | sed -n 's/.*"city"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$_ip" ]; then
     _ip=$(printf '%s' "$_j" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
