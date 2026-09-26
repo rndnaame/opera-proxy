@@ -12,7 +12,9 @@
 #   1.3.12 — [5] API_PROXY: geo через ip-api.com вместо ipinfo.io
 #   1.3.13 — [5] API_PROXY: в geo добавлен country (IP, CC, Country, City)
 #   1.3.14 — [6][8]: [3] Проверить API_PROXY, [4] Отключить
-MENU_VERSION="1.3.14"
+#   1.3.15 — [6][x] сброс conf: жёстко без API_PROXY (иначе 127.0.0.1:11001 ломает туннель)
+#   1.3.16 — conf: OPTIONS без if-блока; API_PROXY=""; rebuild чистит legacy
+MENU_VERSION="1.3.16"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1476,12 +1478,12 @@ SERVER_SELECT="random"
 # Уровень логов: 10=debug, 20=info, 30=warn, 40=error, 50=critical, 60=silent
 VERBOSITY="30"
 
+# socks5-апстрим для API Opera (пусто = напрямую). Пример: 1.2.3.4:1080
+API_PROXY=""
 
-# ── Автогенерация OPTIONS для Entware init.d / rc.func ────────
-OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
-if [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ]; then
-    OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
-fi'
+# ── OPTIONS для Entware init.d / rc.func (пересобирается меню при изменениях) ──
+OPTIONS="-socks-mode -country EU -bind-address 127.0.0.1:18080 -server-selection random -verbosity 30 -bootstrap-dns https://dns.google/dns-query,https://1.1.1.1/dns-query -fake-SNI 2gis.com"
+'
 
 # Прочитать значение переменной из conf (без выполнения if/OPTIONS)
 conf_get() {
@@ -1513,9 +1515,10 @@ strip_api_proxy_from_conf() {
 # Пересборка OPTIONS из текущих параметров конфига (сохраняя -api-proxy).
 # Вызывается автоматически после каждого изменения параметра.
 rebuild_options() {
+  # Собирает одну строку OPTIONS (без if-блоков) + API_PROXY=
   local r_country r_bindaddr r_bindport r_obf r_sni r_doh r_srvsel r_verb r_opts r_api
   r_country=$(conf_get COUNTRY);      [ -z "$r_country" ] && r_country="EU"
-  r_bindaddr=$(conf_get BIND_ADDR);   [ -z "$r_bindaddr" ] && r_bindaddr="0.0.0.0"
+  r_bindaddr=$(conf_get BIND_ADDR);   [ -z "$r_bindaddr" ] && r_bindaddr="127.0.0.1"
   r_bindport=$(conf_get BIND_PORT);   [ -z "$r_bindport" ] && r_bindport="$BIND_PORT_DEFAULT"
   r_obf=$(conf_get OBFUSCATE);        [ -z "$r_obf" ] && r_obf="yes"
   r_sni=$(conf_get FAKE_SNI)
@@ -1524,19 +1527,25 @@ rebuild_options() {
   r_verb=$(conf_get VERBOSITY);       [ -z "$r_verb" ] && r_verb="30"
   r_opts="-socks-mode -country $r_country -bind-address ${r_bindaddr}:${r_bindport} -server-selection $r_srvsel -verbosity $r_verb -bootstrap-dns $r_doh"
   [ "$r_obf" = "yes" ] && [ -n "$r_sni" ] && r_opts="$r_opts -fake-SNI $r_sni"
+
   r_api=$(conf_get API_PROXY)
+  # legacy Fix: OPTIONS="$OPTIONS -api-proxy ..."
+  _leg=$(grep '^OPTIONS="\$OPTIONS -api-proxy' "$OP_CONF_FILE" 2>/dev/null | head -1 | sed 's/.*-api-proxy[[:space:]]*//;s#^socks5://##;s/"*$//')
+  [ -n "$_leg" ] && r_api="$_leg"
+  # убрать legacy-дописки и старые if-блоки (OBFUSCATE → fake-SNI)
+  grep -v '^OPTIONS="\$OPTIONS -api-proxy' "$OP_CONF_FILE" 2>/dev/null     | awk '
+        /^if \[ "$OBFUSCATE"/ { skip=1; next }
+        skip && /^fi$/ { skip=0; next }
+        skip { next }
+        { print }
+      ' > "/tmp/opera-conf-rb.$$" 2>/dev/null     && mv "/tmp/opera-conf-rb.$$" "$OP_CONF_FILE" || rm -f "/tmp/opera-conf-rb.$$"
+
   if [ -n "$r_api" ]; then
-    # legacy-дописка Fix'ом: OPTIONS="$OPTIONS -api-proxy ..." в конце конфига —
-    # фактический апстрим хранится там, локальная переменная устарела
-    _leg=$(grep '^OPTIONS="$OPTIONS -api-proxy' "$OP_CONF_FILE" 2>/dev/null | head -1 | sed 's/.*-api-proxy[[:space:]]*//;s#^socks5://##;s/"*$//')
-    [ -n "$_leg" ] && r_api="$_leg"
+    r_opts="$r_opts -api-proxy socks5://$r_api"
+    conf_set API_PROXY "$r_api"
   else
-    # API_PROXY не задан (пусто или удалена при отключении): если -api-proxy
-    # остался в старой строке OPTIONS / дописке Fix'а — удаляем их, чтобы
-    # параметр не «возродился» при пересборке
-    strip_api_proxy_from_conf
+    conf_set API_PROXY ""
   fi
-  [ -n "$r_api" ] && r_opts="$r_opts -api-proxy socks5://$r_api"
   conf_set OPTIONS "$r_opts"
 }
 
@@ -2060,12 +2069,20 @@ _cc=$REPLY
         sleep 2
         ;;
       x|X)
-        yes_no "Сбросить конфиг к значениям по умолчанию? [y/N]: " "n"
-    if [ "$YESNO" = "1" ]; then
+        yes_no "Сбросить конфиг к значениям по умолчанию (без API_PROXY)? [y/N]: " "n"
+        if [ "$YESNO" = "1" ]; then
           cp "$OP_CONF_FILE" "$OP_CONF_FILE.bak.$(date +%s)" 2>/dev/null
-          printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE" \
-            && printf '%b✓ Конфиг сброшен (backup сохранён рядом).%b\n' "$green" "$reset" \
-            || printf '%b❌ Не удалось записать конфиг%b\n' "$red" "$reset"
+          if printf '%s\n' "$OPERA_CONF_TEMPLATE" > "$OP_CONF_FILE"; then
+            # шаблон без API_PROXY; на всякий случай убрать хвосты
+            sed -i '/^API_PROXY=/d' "$OP_CONF_FILE" 2>/dev/null
+            sed -i 's/ -api-proxy[[:space:]]*socks5:\/\/[^"[:space:]]*//' "$OP_CONF_FILE" 2>/dev/null
+            grep -v '^OPTIONS="\$OPTIONS -api-proxy' "$OP_CONF_FILE" > "/tmp/opera-conf-reset.$$" 2>/dev/null \
+              && mv "/tmp/opera-conf-reset.$$" "$OP_CONF_FILE" || rm -f "/tmp/opera-conf-reset.$$"
+            printf '%b✓ Конфиг сброшен (EU, SNI, без api-proxy). Backup рядом.%b\n' "$green" "$reset"
+            echo "   Нужен перезапуск: [s] или п.[4]"
+          else
+            printf '%b❌ Не удалось записать конфиг%b\n' "$red" "$reset"
+          fi
         fi
         sleep 1
         ;;
