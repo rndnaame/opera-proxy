@@ -22,7 +22,14 @@
 #   1.3.22 — Fix: сначала только t2s; SOCKS — лишь если IP через t2s нет
 #   1.3.23 — Fix: при TG fail на t2s — доп. проверка TG через SOCKS :18080
 #   1.3.24 — рефакторинг fix_opera_tunnel.sh (структура, имена, main-поток)
-MENU_VERSION="1.3.24"
+#   1.3.25 — Fix: параллельный отбор socks5 (×6), таймаут 2с
+#   1.3.26 — Fix: один system configuration save после up+ping-check
+#   1.3.27 — меню: статус туннеля без ndmc (кэш + ip link)
+#   1.3.28 — RCI (127.0.0.1:79) для поиска Proxy/Opera, как KeenKit
+#   1.3.29 — без opera-iface.cache (меньше записей на flash)
+#   1.3.30 — [3] fix-скрипт на flash только если изменился (cmp)
+#   1.3.31 — Fix: refresh socks5 только если кэш <300 или старше 6 ч
+MENU_VERSION="1.3.31"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -161,19 +168,8 @@ show_status() {
     printf "   Сервис      : %bнет init-скрипта%b\n" "$red" "$reset"
   fi
 
-  # Туннель ProxyN / t2sN: отдельно «нет интерфейса» и «опущен (DOWN)»
-  find_opera_iface 2>/dev/null || IFACE="Proxy0"
-  T2S=$(iface_to_t2s "$IFACE")
-  _t2s_exists=0
-  _t2s_up=0
-  if ip link show "$T2S" >/dev/null 2>&1 || ifconfig "$T2S" >/dev/null 2>&1; then
-    _t2s_exists=1
-  fi
-  if ip link show "$T2S" 2>/dev/null | grep -q "state UP"; then
-    _t2s_up=1
-  elif ifconfig "$T2S" 2>/dev/null | grep -q "UP"; then
-    _t2s_up=1
-  fi
+  # Туннель: без ndmc на каждый redraw (кэш + ip link)
+  resolve_tunnel_fast
   if [ "$_t2s_up" = "1" ]; then
     printf "   Туннель     : %s (%s)  %bUP%b\n" "$T2S" "$IFACE" "$green" "$reset"
   elif [ "$_t2s_exists" = "1" ]; then
@@ -246,27 +242,83 @@ CONFEOF
   echo "   ✓ conf: $OP_CONF_FILE (SNI/DoH/COUNTRY)"
 }
 
-# Найти ProxyX с description Opera/OperaProxy или первый свободный
-find_opera_iface() {
-  IFACE=""
-  if ! command -v ndmc >/dev/null 2>&1; then
-    IFACE="Proxy0"
-    return 0
-  fi
-  _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
-  if [ -n "$_rc" ]; then
-    IFACE=$(printf '%s\n' "$_rc" | awk '
-      /^interface Proxy[0-9]+/ { cur=$2 }
-      /description.*(OperaProxy|Opera)/ { print cur; exit }
-    ')
-  fi
-  if [ -z "$IFACE" ] && [ -n "$_rc" ]; then
-    for i in 0 1 2 3 4 5 6 7 8 9; do
-      if ! printf '%s\n' "$_rc" | grep -q "^interface Proxy$i"; then
-        IFACE="Proxy$i"
+# RCI (как KeenKit): локальный REST, обычно быстрее ndmc show running-config
+rci_get() {
+  curl -s -m 3 --connect-timeout 2 "http://127.0.0.1:79/rci/$1" 2>/dev/null || true
+}
+
+rci_post() {
+  curl -s -m 5 --connect-timeout 2 -H "Content-Type: application/json" \
+    -d "$1" "http://127.0.0.1:79/rci/" 2>/dev/null || true
+}
+
+# Найти ProxyN с description Opera* через RCI show/interface (без jq)
+rci_find_opera_iface() {
+  _js=$(rci_get "show/interface")
+  [ -z "$_js" ] && return 1
+  IFACE=$(printf '%s' "$_js" | tr '}' '\n' | awk '
+    /[Oo]pera/ {
+      line=$0
+      if (match(line, /"id"[[:space:]]*:[[:space:]]*"Proxy[0-9]+"/)) {
+        s=substr(line, RSTART, RLENGTH)
+        sub(/^.*"Proxy/, "Proxy", s)
+        sub(/".*/, "", s)
+        print s
+        exit
+      }
+      if (match(line, /Proxy[0-9]+/)) {
+        s=substr(line, RSTART, RLENGTH)
+        print s
+        exit
+      }
+    }
+  ')
+  [ -n "$IFACE" ]
+}
+
+# Статус туннеля для меню: только ip/ifconfig (без записи на flash)
+resolve_tunnel_fast() {
+  IFACE="Proxy0"
+  T2S="t2s0"
+  _t2s_exists=0
+  _t2s_up=0
+  # предпочитаем UP среди t2s0..t2s3
+  for _n in 0 1 2 3; do
+    if ip link show "t2s$_n" >/dev/null 2>&1 || ifconfig "t2s$_n" >/dev/null 2>&1; then
+      _t2s_exists=1
+      IFACE="Proxy$_n"
+      T2S="t2s$_n"
+      if ip link show "t2s$_n" 2>/dev/null | grep -q "UP" || \
+         ifconfig "t2s$_n" 2>/dev/null | grep -q "UP"; then
+        _t2s_up=1
         break
       fi
-    done
+    fi
+  done
+}
+
+# Найти ProxyX: RCI → ndmc → Proxy0 (без кэша на flash)
+find_opera_iface() {
+  IFACE=""
+  if rci_find_opera_iface 2>/dev/null; then
+    return 0
+  fi
+  if command -v ndmc >/dev/null 2>&1; then
+    _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+    if [ -n "$_rc" ]; then
+      IFACE=$(printf '%s\n' "$_rc" | awk '
+        /^interface Proxy[0-9]+/ { cur=$2 }
+        /description.*(OperaProxy|Opera)/ { print cur; exit }
+      ')
+    fi
+    if [ -z "$IFACE" ] && [ -n "$_rc" ]; then
+      for i in 0 1 2 3 4 5 6 7 8 9; do
+        if ! printf '%s\n' "$_rc" | grep -q "^interface Proxy$i"; then
+          IFACE="Proxy$i"
+          break
+        fi
+      done
+    fi
   fi
   [ -z "$IFACE" ] && IFACE="Proxy0"
 }
@@ -620,8 +672,8 @@ fix_opera() {
     return 1
   fi
 
-  echo "→ Обновляем /opt/fix_opera_tunnel.sh ..."
-  cat > /opt/fix_opera_tunnel.sh << 'FIXSCRIPT'
+  echo "→ Проверяем /opt/fix_opera_tunnel.sh ..."
+  cat > /tmp/fix_opera_tunnel.new << 'FIXSCRIPT'
 #!/bin/sh
 # fix_opera_tunnel.sh — диагностика и восстановление туннеля Opera-proxy (Keenetic)
 # Порядок: t2s → (при необходимости) SOCKS → iface up или подбор api-proxy
@@ -682,7 +734,7 @@ http_ok() {
 
 cleanup_s5_tmp() {
   rm -f "$TEMP" "$POOL" /tmp/s5.norm /tmp/s5.pool2 /tmp/s5.bg.done \
-        /tmp/s5.src /tmp/s5.src.* 2>/dev/null || true
+        /tmp/s5.src /tmp/s5.src.* /tmp/s5.ok.* 2>/dev/null || true
 }
 trap cleanup_s5_tmp EXIT INT TERM
 
@@ -710,9 +762,12 @@ iface_down() {
 }
 
 iface_up() {
+  # $1 = save|nosave — save только в конце цепочки (один раз)
   log notice "$IFACE: включён"
   ndmc -c "interface $IFACE up" 2>/dev/null || true
-  ndmc -c "system configuration save" 2>/dev/null || true
+  if [ "${1:-save}" = "save" ]; then
+    ndmc -c "system configuration save" 2>/dev/null || true
+  fi
   sleep 3
 }
 
@@ -822,46 +877,93 @@ shuffle_pool_from() {
   awk 'BEGIN{srand()} {print rand() "\t" $0}' "$1" 2>/dev/null | sort -n | cut -f2- > "$POOL"
 }
 
+# Быстрая проверка для отбора (только HTTP — быстрее HTTPS)
 socks5_alive() {
   _p="$1"
-  _code=$(curl -x "socks5h://$_p" -m 3 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
+  _code=$(curl -x "socks5h://$_p" -m 2 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
     http://api.ipify.org 2>/dev/null)
-  [ "$_code" = "200" ] && return 0
-  _code=$(curl -x "socks5h://$_p" -m 4 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
-    https://api.ipify.org 2>/dev/null)
   [ "$_code" = "200" ] && return 0
   return 1
 }
 
+# Параллельный отбор: пачками по PARALLEL фоновых curl (busybox ash: wait)
 # Результат: COUNT, TESTED, CANDS
 pick_cands() {
   _max="${1:-50}"
   _need=3
-  COUNT=0; TESTED=0; CANDS=""
-  while IFS= read -r p && [ "$COUNT" -lt "$_need" ] && [ "$TESTED" -lt "$_max" ]; do
-    [ -z "$p" ] && continue
-    case " $CANDS " in *" $p "*) continue ;; esac
-    TESTED=$((TESTED + 1))
-    if socks5_alive "$p"; then
+  _par=6
+  COUNT=0; TESTED=0; CANDS=""; _idx=0
+  rm -f /tmp/s5.ok.* 2>/dev/null
+  exec 3< "$POOL" || return 1
+  while [ "$COUNT" -lt "$_need" ] && [ "$TESTED" -lt "$_max" ]; do
+    _batch=0
+    _started=0
+    while [ "$_batch" -lt "$_par" ] && [ "$TESTED" -lt "$_max" ]; do
+      if ! IFS= read -r p <&3; then
+        break
+      fi
+      [ -z "$p" ] && continue
+      case " $CANDS " in *" $p "*) continue ;; esac
+      TESTED=$((TESTED + 1))
+      _batch=$((_batch + 1))
+      _idx=$((_idx + 1))
+      _started=1
+      (
+        _code=$(curl -x "socks5h://$p" -m 2 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
+          http://api.ipify.org 2>/dev/null)
+        [ "$_code" = "200" ] && printf '%s\n' "$p" > "/tmp/s5.ok.$_idx"
+      ) &
+    done
+    [ "$_started" = "0" ] && break
+    wait
+    for _f in /tmp/s5.ok.*; do
+      [ -f "$_f" ] || continue
+      _p=$(cat "$_f" 2>/dev/null)
+      rm -f "$_f"
+      [ -z "$_p" ] && continue
+      case " $CANDS " in *" $_p "*) continue ;; esac
       COUNT=$((COUNT + 1))
-      CANDS="$CANDS $p"
-    fi
-  done < "$POOL"
-  log notice "отобрано $COUNT из $_need за $TESTED проверок${CANDS:+ ·$CANDS}"
+      CANDS="$CANDS $_p"
+      [ "$COUNT" -ge "$_need" ] && break
+    done
+  done
+  exec 3<&-
+  rm -f /tmp/s5.ok.* 2>/dev/null
+  log notice "отобрано $COUNT из $_need за $TESTED проверок (×${_par})${CANDS:+ ·$CANDS}"
+}
+
+# Обновлять список, если записей < 300 или кэшу > 6 часов
+cache_needs_refresh() {
+  _cn="$1"
+  [ -z "$_cn" ] && return 0
+  [ "$_cn" -lt 300 ] 2>/dev/null && return 0
+  [ ! -f "$CACHE" ] && return 0
+  _mtime=$(date -r "$CACHE" +%s 2>/dev/null || stat -c %Y "$CACHE" 2>/dev/null || echo "")
+  _now=$(date +%s 2>/dev/null || echo "0")
+  if [ -n "$_mtime" ] && [ "$_now" -gt 0 ] 2>/dev/null; then
+    _age=$((_now - _mtime))
+    [ "$_age" -gt 21600 ] 2>/dev/null && return 0
+  fi
+  return 1
 }
 
 prepare_pool() {
-  # кэш → сразу отбор; свежие списки в фоне. Нет кэша → sync-загрузка.
+  # кэш → сразу отбор; свежие списки — только если мало адресов или кэш старше 6 ч
   _cn=0
   [ -s "$CACHE" ] && _cn=$(wc -l < "$CACHE" 2>/dev/null | tr -d ' ')
   if [ -n "$_cn" ] && [ "$_cn" -ge 3 ]; then
-    log notice "берём кэш ($_cn адресов), свежий список — в фоне"
     shuffle_pool_from "$CACHE"
-    (
-      refresh_s5_lists
-      rm -f "$TEMP" /tmp/s5.norm /tmp/s5.src /tmp/s5.src.* 2>/dev/null || true
-    ) >/dev/null 2>&1 &
-    BG_PID=$!
+    if cache_needs_refresh "$_cn"; then
+      log notice "берём кэш ($_cn адресов), обновляем список в фоне"
+      (
+        refresh_s5_lists
+        rm -f "$TEMP" /tmp/s5.norm /tmp/s5.src /tmp/s5.src.* 2>/dev/null || true
+      ) >/dev/null 2>&1 &
+      BG_PID=$!
+    else
+      log notice "берём кэш ($_cn адресов, свежий) — загрузка не нужна"
+      BG_PID=""
+    fi
   else
     log notice "кэша нет — загружаем списки прокси..."
     if ! refresh_s5_lists; then
@@ -932,9 +1034,10 @@ try_candidates() {
       if check_ip_socks && check_tg_socks; then
         log warn "успех: api-proxy $p · IP $LAST_IP · Telegram OK"
         show_running
-        iface_up
-        ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null
-        ndmc -c "system configuration save" 2>/dev/null
+        # up + ping-check, затем один save
+        iface_up nosave
+        ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null || true
+        ndmc -c "system configuration save" 2>/dev/null || true
         return 0
       fi
       sleep 2
@@ -952,7 +1055,7 @@ recover_api_proxy() {
   if ! prepare_pool; then
     return 1
   fi
-  log notice "отбор рабочих socks5 (до 50 проверок)..."
+  log notice "отбор рабочих socks5 (до 50, параллельно ×6)..."
   pick_cands 50
 
   if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
@@ -1045,7 +1148,16 @@ exit $?
 
 FIXSCRIPT
 
-  chmod +x /opt/fix_opera_tunnel.sh
+  # Пишем на flash только если содержимое изменилось
+  if [ -f /opt/fix_opera_tunnel.sh ] && cmp -s /tmp/fix_opera_tunnel.new /opt/fix_opera_tunnel.sh 2>/dev/null; then
+    echo "   уже актуален — запись не нужна"
+    rm -f /tmp/fix_opera_tunnel.new
+  else
+    mv /tmp/fix_opera_tunnel.new /opt/fix_opera_tunnel.sh
+    chmod +x /opt/fix_opera_tunnel.sh
+    echo "   обновлён: /opt/fix_opera_tunnel.sh"
+  fi
+  chmod +x /opt/fix_opera_tunnel.sh 2>/dev/null || true
 
   if [ ! -f /opt/etc/init.d/S10cron ] && [ ! -f /opt/bin/cron ]; then
     echo "Устанавливаем cron..."
@@ -1056,14 +1168,21 @@ FIXSCRIPT
   fi
 
   mkdir -p /opt/etc/cron.hourly
-  cat > /opt/etc/cron.hourly/fix_opera_tunnel << 'CRON'
+  cat > /tmp/fix_opera_cron.new << 'CRON'
 #!/bin/sh
 /opt/fix_opera_tunnel.sh
 CRON
-  chmod +x /opt/etc/cron.hourly/fix_opera_tunnel
+  if [ -f /opt/etc/cron.hourly/fix_opera_tunnel ] && \
+     cmp -s /tmp/fix_opera_cron.new /opt/etc/cron.hourly/fix_opera_tunnel 2>/dev/null; then
+    rm -f /tmp/fix_opera_cron.new
+  else
+    mv /tmp/fix_opera_cron.new /opt/etc/cron.hourly/fix_opera_tunnel
+    chmod +x /opt/etc/cron.hourly/fix_opera_tunnel
+    echo "   cron.hourly обновлён"
+  fi
+  chmod +x /opt/etc/cron.hourly/fix_opera_tunnel 2>/dev/null || true
 
-  echo "✅ Скрипт обновлён: /opt/fix_opera_tunnel.sh"
-  echo "Cron настроен (каждый час)"
+  echo "Cron: каждый час"
   echo ""
   echo "Запускаем скрипт..."
   echo ""
