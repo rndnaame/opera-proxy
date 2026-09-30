@@ -18,7 +18,8 @@
 #   1.3.18 — Fix: отбор api-proxy из кэша сразу, обновление списков в фоне
 #   1.3.19 — Fix: trap EXIT — чистка /tmp/s5.* после подбора
 #   1.3.20 — Fix: компактные логи журнала (сводка check/pick/try/OK)
-MENU_VERSION="1.3.20"
+#   1.3.21 — Fix: понятные русские сообщения в журнале
+MENU_VERSION="1.3.21"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -670,17 +671,21 @@ show_config() {
       | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
   fi
   if [ -z "$_cmd" ]; then
-    log notice "run: (не запущен)"
+    log notice "opera-proxy не запущен"
     return
   fi
   _cc=$(printf '%s' "$_cmd" | sed -n 's/.*-country[= ]\([^ ]*\).*/\1/p')
   _ba=$(printf '%s' "$_cmd" | sed -n 's/.*-bind-address[= ]\([^ ]*\).*/\1/p')
   _ap=$(printf '%s' "$_cmd" | sed -n 's/.*-api-proxy[= ]socks5:\/\/\([^ ]*\).*/\1/p')
   _sni=$(printf '%s' "$_cmd" | sed -n 's/.*-fake-SNI[= ]\([^ ]*\).*/\1/p')
-  _sum="pid ${_pid:-?} country=${_cc:-?} bind=${_ba:-?}"
-  [ -n "$_sni" ] && _sum="$_sum sni=$_sni"
-  [ -n "$_ap" ] && _sum="$_sum api=$_ap" || _sum="$_sum api=—"
-  log notice "run: $_sum"
+  _sum="pid ${_pid:-?}, регион ${_cc:-?}, порт ${_ba:-?}"
+  [ -n "$_sni" ] && _sum="$_sum, SNI $_sni"
+  if [ -n "$_ap" ]; then
+    _sum="$_sum, api-proxy $_ap"
+  else
+    _sum="$_sum, api-proxy нет"
+  fi
+  log notice "запущен: $_sum"
 }
 
 # IFACE по description Opera/OperaProxy → t2sN (сразу, до проверок)
@@ -741,7 +746,7 @@ socks_ok() {
 }
 
 proxy0_down() {
-  log notice "$IFACE down"
+  log notice "$IFACE: выключен (подбор прокси)"
   ndmc -c "interface $IFACE down" 2>/dev/null || true
   /opt/etc/init.d/S99opera-proxy stop 2>/dev/null || true
   killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
@@ -749,7 +754,7 @@ proxy0_down() {
 }
 
 proxy0_up() {
-  log notice "$IFACE up"
+  log notice "$IFACE: включён"
   ndmc -c "interface $IFACE up" 2>/dev/null || true
   ndmc -c "system configuration save" 2>/dev/null || true
   sleep 3
@@ -764,35 +769,35 @@ check_ip_local && _sk_ip=1
 _sk_ip_val=""; [ "$_sk_ip" = "1" ] && _sk_ip_val="$LAST_IP"
 [ "$_sk_ip" = "1" ] && check_telegram_local && _sk_tg=1
 
-_st_t2s="IP=✗ TG=✗"
-[ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ] && _st_t2s="IP=$_t2s_ip_val TG=OK"
-[ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" != "1" ] && _st_t2s="IP=$_t2s_ip_val TG=✗"
-[ "$_t2s_ip" != "1" ] && [ "$_t2s_tg" = "1" ] && _st_t2s="IP=✗ TG=OK"
+_st_t2s="IP нет, Telegram нет"
+[ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ] && _st_t2s="IP $_t2s_ip_val, Telegram OK"
+[ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" != "1" ] && _st_t2s="IP $_t2s_ip_val, Telegram нет"
+[ "$_t2s_ip" != "1" ] && [ "$_t2s_tg" = "1" ] && _st_t2s="IP нет, Telegram OK"
 
-_st_sk="IP=✗ TG=✗"
-[ "$_sk_ip" = "1" ] && [ "$_sk_tg" = "1" ] && _st_sk="IP=$_sk_ip_val TG=OK"
-[ "$_sk_ip" = "1" ] && [ "$_sk_tg" != "1" ] && _st_sk="IP=$_sk_ip_val TG=✗"
+_st_sk="IP нет, Telegram нет"
+[ "$_sk_ip" = "1" ] && [ "$_sk_tg" = "1" ] && _st_sk="IP $_sk_ip_val, Telegram OK"
+[ "$_sk_ip" = "1" ] && [ "$_sk_tg" != "1" ] && _st_sk="IP $_sk_ip_val, Telegram нет"
 
-log notice "check $IFACE/$T2S: $_st_t2s | socks $LOCAL_SOCKS: $_st_sk"
+log notice "проверка $IFACE/$T2S: $_st_t2s · локальный SOCKS: $_st_sk"
 
 if [ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ]; then
-  log warn "OK tunnel"
+  log warn "туннель в порядке"
   show_config
   exit 0
 fi
 
 if [ "$_sk_ip" = "1" ] && [ "$_sk_tg" = "1" ]; then
-  log notice "socks OK → $IFACE up (api-proxy не трогаем)"
+  log notice "локальный SOCKS работает — поднимаем $IFACE без смены прокси"
   proxy0_up
   sleep 2
   if tunnel_ok; then
-    log warn "OK tunnel (iface up only)"
+    log warn "туннель восстановлен (достаточно было поднять $IFACE)"
     show_config
     exit 0
   fi
-  log err "socks OK, $T2S still fail → pick api-proxy"
+  log err "SOCKS жив, но $T2S всё ещё недоступен — подбираем api-proxy"
 else
-  log err "socks fail → pick api-proxy"
+  log err "локальный SOCKS не работает — подбираем api-proxy"
 fi
 
 proxy0_down
@@ -849,7 +854,7 @@ refresh_s5_lists() {
   if [ -n "$_nn" ] && [ "$_nn" -ge 5 ]; then
     mkdir -p "$(dirname "$CACHE")" 2>/dev/null || true
     cp /tmp/s5.norm "$CACHE" 2>/dev/null || true
-    log notice "cache ← $_nn"
+    log notice "список прокси обновлён ($_nn адресов)"
     return 0
   fi
   return 1
@@ -867,7 +872,7 @@ _cache_n=0
 [ -s "$CACHE" ] && _cache_n=$(wc -l < "$CACHE" 2>/dev/null | tr -d ' ')
 
 if [ -n "$_cache_n" ] && [ "$_cache_n" -ge 3 ]; then
-  log notice "pool cache=$_cache_n (bg refresh)"
+  log notice "берём кэш ($_cache_n адресов), свежий список — в фоне"
   shuffle_pool_from "$CACHE"
   (
     refresh_s5_lists
@@ -875,10 +880,10 @@ if [ -n "$_cache_n" ] && [ "$_cache_n" -ge 3 ]; then
   ) >/dev/null 2>&1 &
   BG_PID=$!
 else
-  log notice "pool: fetch lists..."
+  log notice "кэша нет — загружаем списки прокси..."
   if ! refresh_s5_lists; then
     if [ -s "$CACHE" ]; then
-      log notice "pool: sources fail → cache"
+      log notice "источники недоступны — используем старый кэш"
       cp "$CACHE" /tmp/s5.norm
     fi
   fi
@@ -891,7 +896,7 @@ fi
 PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
 
 if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
-  log err "no socks5 list (net/cache empty)"
+  log err "нет списка прокси (сеть недоступна, кэш пуст)"
   exit 1
 fi
 
@@ -923,14 +928,14 @@ pick_cands() {
       CANDS="$CANDS $p"
     fi
   done < "$POOL"
-  log notice "pick $COUNT/$NEED in $TESTED tests${CANDS:+:$CANDS}"
+  log notice "отобрано $COUNT из $NEED за $TESTED проверок${CANDS:+ ·$CANDS}"
 }
 
-log notice "pick socks5 (max 50)..."
+log notice "отбор рабочих socks5 (до 50 проверок)..."
 pick_cands 50
 
 if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
-  log notice "cache miss → wait bg lists"
+  log notice "в кэше нет живых — ждём обновление списка..."
   wait "$BG_PID" 2>/dev/null || true
   BG_PID=""
   if [ -s "$CACHE" ]; then
@@ -938,7 +943,7 @@ if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
     pick_cands 50
   fi
 elif [ "$COUNT" -lt 1 ]; then
-  log notice "retry +50"
+  log notice "повторный отбор (+50 адресов)..."
   tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
   if [ -s /tmp/s5.pool2 ]; then
     POOL=/tmp/s5.pool2
@@ -948,7 +953,7 @@ fi
 
 if [ -z "$CANDS" ] || [ "$COUNT" -lt 1 ]; then
   [ -n "$BG_PID" ] && wait "$BG_PID" 2>/dev/null || true
-  log err "no live socks5"
+  log err "не найдено рабочих socks5"
   exit 1
 fi
 
@@ -996,14 +1001,14 @@ start() {
 SUCCESS=0
 for p in $CANDS; do
   [ -z "$p" ] && continue
-  log notice "try api=$p"
+  log notice "пробуем api-proxy $p"
   start "-api-proxy socks5://$p"
   sleep 6
   i=1
   while [ "$i" -le 6 ]; do
     if check_ip_local; then
       if check_telegram_local; then
-        log warn "OK api=$p IP=$LAST_IP TG=OK"
+        log warn "успех: api-proxy $p · IP $LAST_IP · Telegram OK"
         show_config
         proxy0_up
         ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null
@@ -1015,10 +1020,10 @@ for p in $CANDS; do
     sleep 2
     i=$((i + 1))
   done
-  log notice "fail api=$p"
+  log notice "не подошёл: $p"
 done
 
-log err "FAIL restore ($IFACE stays down)"
+log err "не удалось восстановить туннель ($IFACE остаётся выключен)"
 exit 1
 FIXSCRIPT
 
