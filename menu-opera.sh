@@ -19,7 +19,9 @@
 #   1.3.19 — Fix: trap EXIT — чистка /tmp/s5.* после подбора
 #   1.3.20 — Fix: компактные логи журнала (сводка check/pick/try/OK)
 #   1.3.21 — Fix: понятные русские сообщения в журнале
-MENU_VERSION="1.3.21"
+#   1.3.22 — Fix: сначала только t2s; SOCKS — лишь если IP через t2s нет
+#   1.3.23 — Fix: при TG fail на t2s — доп. проверка TG через SOCKS :18080
+MENU_VERSION="1.3.23"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -760,44 +762,60 @@ proxy0_up() {
   sleep 3
 }
 
-# ── Диагностика (компактная сводка в 1–2 строки) ──
-_t2s_ip=0; _t2s_tg=0; _sk_ip=0; _sk_tg=0
+# ── Диагностика ──
+# 1) Сначала только t2s (маршрут Keenetic). Если IP+TG OK — выход, SOCKS не трогаем.
+# 2) IP через t2s есть, Telegram нет — туннель считаем рабочим (TG часто флапает).
+# 3) IP через t2s нет — смотрим локальный SOCKS:
+#    · SOCKS OK → только поднять iface (api-proxy не меняем)
+#    · SOCKS fail → полный подбор api-proxy
+
+_t2s_ip=0; _t2s_tg=0
 check_ip && _t2s_ip=1
-[ "$_t2s_ip" = "1" ] && check_telegram && _t2s_tg=1
 _t2s_ip_val=""; [ "$_t2s_ip" = "1" ] && _t2s_ip_val="$LAST_IP"
-check_ip_local && _sk_ip=1
-_sk_ip_val=""; [ "$_sk_ip" = "1" ] && _sk_ip_val="$LAST_IP"
-[ "$_sk_ip" = "1" ] && check_telegram_local && _sk_tg=1
-
-_st_t2s="IP нет, Telegram нет"
-[ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ] && _st_t2s="IP $_t2s_ip_val, Telegram OK"
-[ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" != "1" ] && _st_t2s="IP $_t2s_ip_val, Telegram нет"
-[ "$_t2s_ip" != "1" ] && [ "$_t2s_tg" = "1" ] && _st_t2s="IP нет, Telegram OK"
-
-_st_sk="IP нет, Telegram нет"
-[ "$_sk_ip" = "1" ] && [ "$_sk_tg" = "1" ] && _st_sk="IP $_sk_ip_val, Telegram OK"
-[ "$_sk_ip" = "1" ] && [ "$_sk_tg" != "1" ] && _st_sk="IP $_sk_ip_val, Telegram нет"
-
-log notice "проверка $IFACE/$T2S: $_st_t2s · локальный SOCKS: $_st_sk"
+[ "$_t2s_ip" = "1" ] && check_telegram && _t2s_tg=1
 
 if [ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ]; then
+  log notice "проверка $IFACE/$T2S: IP $_t2s_ip_val, Telegram OK"
   log warn "туннель в порядке"
   show_config
   exit 0
 fi
 
-if [ "$_sk_ip" = "1" ] && [ "$_sk_tg" = "1" ]; then
-  log notice "локальный SOCKS работает — поднимаем $IFACE без смены прокси"
+if [ "$_t2s_ip" = "1" ]; then
+  # IP через t2s есть, Telegram нет — уточняем через локальный SOCKS
+  log notice "проверка $IFACE/$T2S: IP $_t2s_ip_val, Telegram нет"
+  if check_telegram_local; then
+    log notice "Telegram через SOCKS $LOCAL_SOCKS: OK (сбой только на t2s)"
+    log warn "туннель в порядке (IP через $T2S есть)"
+  else
+    log notice "Telegram через SOCKS $LOCAL_SOCKS: нет"
+    log warn "туннель частично: IP через $T2S есть, Telegram недоступен (не чиним api-proxy)"
+  fi
+  show_config
+  exit 0
+fi
+
+log notice "проверка $IFACE/$T2S: IP нет — смотрим локальный SOCKS $LOCAL_SOCKS"
+
+_sk_ip=0; _sk_tg=0
+check_ip_local && _sk_ip=1
+_sk_ip_val=""; [ "$_sk_ip" = "1" ] && _sk_ip_val="$LAST_IP"
+[ "$_sk_ip" = "1" ] && check_telegram_local && _sk_tg=1
+
+if [ "$_sk_ip" = "1" ]; then
+  log notice "локальный SOCKS: IP ${_sk_ip_val}, Telegram $([ "$_sk_tg" = "1" ] && echo OK || echo нет)"
+  log notice "opera-proxy работает — поднимаем $IFACE без смены api-proxy"
   proxy0_up
   sleep 2
-  if tunnel_ok; then
-    log warn "туннель восстановлен (достаточно было поднять $IFACE)"
+  if check_ip; then
+    log warn "туннель восстановлен (поднят $IFACE, IP $LAST_IP)"
     show_config
     exit 0
   fi
-  log err "SOCKS жив, но $T2S всё ещё недоступен — подбираем api-proxy"
+  log err "SOCKS жив, но $T2S после включения всё ещё без IP — подбираем api-proxy"
 else
-  log err "локальный SOCKS не работает — подбираем api-proxy"
+  log notice "локальный SOCKS: не отвечает"
+  log err "нужен подбор api-proxy"
 fi
 
 proxy0_down
