@@ -29,7 +29,8 @@
 #   1.3.29 — без opera-iface.cache (меньше записей на flash)
 #   1.3.30 — [3] fix-скрипт на flash только если изменился (cmp)
 #   1.3.31 — Fix: refresh socks5 только если кэш <300 или старше 6 ч
-MENU_VERSION="1.3.31"
+#   1.3.32 — Fix recovery: 3 раунда, до 5 кандидатов×80, пропуск уже пробованных
+MENU_VERSION="1.3.32"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -886,11 +887,12 @@ socks5_alive() {
   return 1
 }
 
-# Параллельный отбор: пачками по PARALLEL фоновых curl (busybox ash: wait)
-# Результат: COUNT, TESTED, CANDS
+# Параллельный отбор: пачками по PARALLEL (busybox ash: wait)
+# Пропускает адреса из TRIED_API. Результат: COUNT, TESTED, CANDS
+TRIED_API=""
 pick_cands() {
-  _max="${1:-50}"
-  _need=3
+  _max="${1:-80}"
+  _need="${2:-5}"
   _par=6
   COUNT=0; TESTED=0; CANDS=""; _idx=0
   rm -f /tmp/s5.ok.* 2>/dev/null
@@ -903,7 +905,7 @@ pick_cands() {
         break
       fi
       [ -z "$p" ] && continue
-      case " $CANDS " in *" $p "*) continue ;; esac
+      case " $CANDS $TRIED_API " in *" $p "*) continue ;; esac
       TESTED=$((TESTED + 1))
       _batch=$((_batch + 1))
       _idx=$((_idx + 1))
@@ -921,7 +923,7 @@ pick_cands() {
       _p=$(cat "$_f" 2>/dev/null)
       rm -f "$_f"
       [ -z "$_p" ] && continue
-      case " $CANDS " in *" $_p "*) continue ;; esac
+      case " $CANDS $TRIED_API " in *" $_p "*) continue ;; esac
       COUNT=$((COUNT + 1))
       CANDS="$CANDS $_p"
       [ "$COUNT" -ge "$_need" ] && break
@@ -1026,15 +1028,15 @@ apply_api_proxy() {
 try_candidates() {
   for p in $CANDS; do
     [ -z "$p" ] && continue
+    case " $TRIED_API " in *" $p "*) continue ;; esac
     log notice "пробуем api-proxy $p"
     apply_api_proxy "$p"
-    sleep 6
+    sleep 5
     i=1
-    while [ "$i" -le 6 ]; do
+    while [ "$i" -le 5 ]; do
       if check_ip_socks && check_tg_socks; then
         log warn "успех: api-proxy $p · IP $LAST_IP · Telegram OK"
         show_running
-        # up + ping-check, затем один save
         iface_up nosave
         ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null || true
         ndmc -c "system configuration save" 2>/dev/null || true
@@ -1044,48 +1046,61 @@ try_candidates() {
       i=$((i + 1))
     done
     log notice "не подошёл: $p"
+    TRIED_API="$TRIED_API $p"
   done
   return 1
 }
 
-# ─── полный recovery: подбор api-proxy ─────────────────
+# ─── полный recovery: подбор api-proxy (до 3 раундов) ───
 
 recover_api_proxy() {
   iface_down
   if ! prepare_pool; then
     return 1
   fi
-  log notice "отбор рабочих socks5 (до 50, параллельно ×6)..."
-  pick_cands 50
 
-  if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
-    log notice "в кэше нет живых — ждём обновление списка..."
-    wait "$BG_PID" 2>/dev/null || true
-    BG_PID=""
+  TRIED_API=""
+  _round=1
+  while [ "$_round" -le 3 ]; do
+    log notice "отбор socks5, раунд $_round/3 (до 80, ×6)..."
+    pick_cands 80 5
+
+    if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
+      log notice "живых нет — ждём обновление списка..."
+      wait "$BG_PID" 2>/dev/null || true
+      BG_PID=""
+      [ -s "$CACHE" ] && shuffle_pool_from "$CACHE"
+      pick_cands 80 5
+    fi
+
+    if [ "$COUNT" -lt 1 ]; then
+      log notice "раунд $_round: живых socks5 нет — перемешиваем пул"
+      if [ -s "$CACHE" ]; then
+        shuffle_pool_from "$CACHE"
+      elif [ -s /tmp/s5.norm ]; then
+        shuffle_pool_from /tmp/s5.norm
+      fi
+      _round=$((_round + 1))
+      continue
+    fi
+
+    if try_candidates; then
+      return 0
+    fi
+
+    log notice "раунд $_round: api-proxy не подошли — следующий отбор"
+    # новый shuffle, исключая TRIED_API на этапе pick
     if [ -s "$CACHE" ]; then
       shuffle_pool_from "$CACHE"
-      pick_cands 50
+    elif [ -s /tmp/s5.norm ]; then
+      shuffle_pool_from /tmp/s5.norm
     fi
-  elif [ "$COUNT" -lt 1 ]; then
-    log notice "повторный отбор (+50 адресов)..."
-    tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
-    if [ -s /tmp/s5.pool2 ]; then
-      POOL=/tmp/s5.pool2
-      pick_cands 50
-    fi
-  fi
+    _round=$((_round + 1))
+  done
 
-  if [ -z "$CANDS" ] || [ "$COUNT" -lt 1 ]; then
-    [ -n "$BG_PID" ] && wait "$BG_PID" 2>/dev/null || true
-    log err "не найдено рабочих socks5"
-    return 1
-  fi
-
-  try_candidates || {
-    log err "не удалось восстановить туннель ($IFACE остаётся выключен)"
-    return 1
-  }
-  return 0
+  [ -n "$BG_PID" ] && wait "$BG_PID" 2>/dev/null || true
+  log err "не удалось восстановить туннель ($IFACE остаётся выключен)"
+  return 1
 }
 
 # ─── main ──────────────────────────────────────────────
