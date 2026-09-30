@@ -15,7 +15,8 @@
 #   1.3.15 — [6][x] сброс conf: жёстко без API_PROXY (иначе 127.0.0.1:11001 ломает туннель)
 #   1.3.16 — conf: OPTIONS без if-блока; API_PROXY=""; rebuild чистит legacy
 #   1.3.17 — Fix show_config: cmdline процесса, а не cat conf
-MENU_VERSION="1.3.17"
+#   1.3.18 — Fix: отбор api-proxy из кэша сразу, обновление списков в фоне
+MENU_VERSION="1.3.18"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -790,77 +791,104 @@ fi
 
 log err "✗ Туннель требует восстановления (подбор socks5)"
 
-# Порядок: down → списки → отбор → local-test → up
+# Порядок: down → (кэш сразу / списки в фоне) → отбор → local-test → up
 proxy0_down
 
 TEMP=/tmp/s5.raw
 POOL=/tmp/s5.pool
 CACHE="/opt/etc/opera-s5.cache"
-rm -f "$TEMP" "$POOL"
+BG_PID=""
+rm -f "$TEMP" "$POOL" /tmp/s5.norm /tmp/s5.bg.done
 : > "$TEMP"
 
 fetch_list() {
   _url="$1"
   _label="$2"
-  _tmp="/tmp/s5.src"
+  _tmp="/tmp/s5.src.$$"
   if curl_get "$_url" "$_tmp"; then
     _n=$(grep -cE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$_tmp" 2>/dev/null || echo 0)
     if [ "$_n" -gt 0 ] 2>/dev/null; then
       log notice "   + $_label: $_n"
       cat "$_tmp" >> "$TEMP"
+      rm -f "$_tmp"
       return 0
     fi
   fi
+  rm -f "$_tmp"
   log notice "   − $_label: недоступен"
   return 1
 }
 
-log warn "Загрузка списков socks5..."
-GOT=0
-fetch_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" "monosans" && GOT=1
-fetch_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" "proxmint" && GOT=1
-fetch_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" "proxyscrape≤3s" && GOT=1
-fetch_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" "jetkai" && GOT=1
-fetch_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" "relayglass" && GOT=1
-# запасной крупный список (если качественные недоступны)
-if [ "$GOT" = "0" ]; then
-  fetch_list "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt" "TheSpeedX" && GOT=1
-  fetch_list "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt" "hookzof" && GOT=1
-fi
-
-# Нормализация
-sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g; s/#.*//' "$TEMP" 2>/dev/null \
-  | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' \
-  | sort -u > /tmp/s5.norm
-
-_norm_n=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
-if [ -n "$_norm_n" ] && [ "$_norm_n" -ge 5 ]; then
-  # обновить кэш
-  mkdir -p "$(dirname "$CACHE")" 2>/dev/null || true
-  cp /tmp/s5.norm "$CACHE" 2>/dev/null || true
-  log notice "   кэш обновлён: $CACHE ($_norm_n)"
-else
-  # fallback на кэш
-  if [ -s "$CACHE" ]; then
-    log warn "Источники недоступны — берём кэш $CACHE"
-    cp "$CACHE" /tmp/s5.norm
-    _norm_n=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
+# Скачать списки → /tmp/s5.norm → CACHE (для фона и sync-fallback)
+refresh_s5_lists() {
+  : > "$TEMP"
+  GOT=0
+  fetch_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" "monosans" && GOT=1
+  fetch_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" "proxmint" && GOT=1
+  fetch_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" "proxyscrape≤3s" && GOT=1
+  fetch_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" "jetkai" && GOT=1
+  fetch_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" "relayglass" && GOT=1
+  if [ "$GOT" = "0" ]; then
+    fetch_list "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt" "TheSpeedX" && GOT=1
+    fetch_list "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt" "hookzof" && GOT=1
   fi
-fi
+  sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g; s/#.*//' "$TEMP" 2>/dev/null \
+    | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' \
+    | sort -u > /tmp/s5.norm
+  _nn=$(wc -l < /tmp/s5.norm 2>/dev/null | tr -d ' ')
+  if [ -n "$_nn" ] && [ "$_nn" -ge 5 ]; then
+    mkdir -p "$(dirname "$CACHE")" 2>/dev/null || true
+    cp /tmp/s5.norm "$CACHE" 2>/dev/null || true
+    log notice "   кэш обновлён: $CACHE ($_nn)"
+    return 0
+  fi
+  return 1
+}
 
-awk 'BEGIN{srand()} {print rand() "\t" $0}' /tmp/s5.norm 2>/dev/null \
-  | sort -n \
-  | cut -f2- > "$POOL"
+shuffle_pool_from() {
+  # $1 = файл IP:PORT → $POOL (перемешанный)
+  awk 'BEGIN{srand()} {print rand() "\t" $0}' "$1" 2>/dev/null \
+    | sort -n \
+    | cut -f2- > "$POOL"
+}
+
+# ── Быстрый старт из кэша + обновление списков в фоне ──
+_cache_n=0
+[ -s "$CACHE" ] && _cache_n=$(wc -l < "$CACHE" 2>/dev/null | tr -d ' ')
+
+if [ -n "$_cache_n" ] && [ "$_cache_n" -ge 3 ]; then
+  log warn "Кэш socks5: $_cache_n шт. — отбор сразу, списки обновляем в фоне"
+  shuffle_pool_from "$CACHE"
+  (
+    log notice "Фон: загрузка свежих списков socks5..."
+    refresh_s5_lists
+    touch /tmp/s5.bg.done
+  ) >/dev/null 2>&1 &
+  BG_PID=$!
+else
+  log warn "Кэш пуст/мал — загрузка списков socks5..."
+  if ! refresh_s5_lists; then
+    if [ -s "$CACHE" ]; then
+      log warn "Источники недоступны — берём кэш $CACHE"
+      cp "$CACHE" /tmp/s5.norm
+    fi
+  fi
+  if [ ! -s /tmp/s5.norm ] && [ -s "$CACHE" ]; then
+    cp "$CACHE" /tmp/s5.norm
+  fi
+  shuffle_pool_from /tmp/s5.norm
+fi
 
 PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
-log warn "Пул после unique: ${PROXY_COUNT:-0} шт."
+log warn "Пул: ${PROXY_COUNT:-0} шт."
 
 if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
   log err "Нет списка socks5 (сеть/GitHub недоступны, кэш пуст)"
+  [ -n "$BG_PID" ] && kill "$BG_PID" 2>/dev/null
   exit 1
 fi
 
-# Быстрая проверка socks5: сначала HTTP (быстрее), потом HTTPS
+# Быстрая проверка socks5: HTTP, затем HTTPS
 socks5_ok() {
   _p="$1"
   _code=$(curl -x "socks5h://$_p" -m 3 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
@@ -872,51 +900,60 @@ socks5_ok() {
   return 1
 }
 
-# Последовательный отбор (надёжнее на busybox, чем parallel &)
-NEED=3
-MAX_TEST=50
-COUNT=0
-TESTED=0
-CANDS=""
+# Отбор кандидатов из $POOL
+pick_cands() {
+  NEED=3
+  MAX_TEST="${1:-50}"
+  COUNT=0
+  TESTED=0
+  CANDS=""
+  log warn "Отбор socks5 (макс ${MAX_TEST}, нужно ${NEED})..."
+  while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$MAX_TEST" ]; do
+    [ -z "$p" ] && continue
+    case " $CANDS " in *" $p "*) continue ;; esac
+    TESTED=$((TESTED + 1))
+    if [ $((TESTED % 10)) -eq 0 ]; then
+      log notice "   ... проверено $TESTED, найдено $COUNT"
+    fi
+    if socks5_ok "$p"; then
+      COUNT=$((COUNT + 1))
+      CANDS="$CANDS $p"
+      log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
+    fi
+  done < "$POOL"
+  log warn "Отбор: найдено $COUNT за $TESTED проверок"
+}
 
-log warn "Отбор socks5 (последовательно, макс ${MAX_TEST}, stop at ${NEED})..."
+pick_cands 50
 
-while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$MAX_TEST" ]; do
-  [ -z "$p" ] && continue
-  case " $CANDS " in *" $p "*) continue ;; esac
-  TESTED=$((TESTED + 1))
-  # прогресс каждые 10
-  if [ $((TESTED % 10)) -eq 0 ]; then
-    log notice "   ... проверено $TESTED, найдено $COUNT"
+# Если из кэша 0 живых — дождаться фона и повторить со свежим списком
+if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
+  log warn "Кэш не дал кандидатов — ждём обновление списков..."
+  wait "$BG_PID" 2>/dev/null || true
+  BG_PID=""
+  if [ -s "$CACHE" ]; then
+    shuffle_pool_from "$CACHE"
+    PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
+    log warn "Свежий пул: ${PROXY_COUNT:-0} шт."
+    pick_cands 50
   fi
-  if socks5_ok "$p"; then
-    COUNT=$((COUNT + 1))
-    CANDS="$CANDS $p"
-    log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
-  fi
-done < "$POOL"
-
-# Второй проход, если пусто
-if [ "$COUNT" -lt 1 ]; then
+elif [ "$COUNT" -lt 1 ]; then
   log warn "0 кандидатов — второй проход (+50)..."
   tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
   if [ -s /tmp/s5.pool2 ]; then
-    while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt 100 ]; do
-      [ -z "$p" ] && continue
-      case " $CANDS " in *" $p "*) continue ;; esac
-      TESTED=$((TESTED + 1))
-      if socks5_ok "$p"; then
-        COUNT=$((COUNT + 1))
-        CANDS="$CANDS $p"
-        log notice "   кандидат #$COUNT: $p  (проверено $TESTED)"
-      fi
-    done < /tmp/s5.pool2
+    POOL=/tmp/s5.pool2
+    pick_cands 50
   fi
 fi
 
-log warn "Отбор: найдено $COUNT за $TESTED проверок"
+# Фон больше не нужен (успех или полный fail)
+if [ -n "$BG_PID" ]; then
+  # не блокируем успех — кэш обновится в фоне
+  :
+fi
 
 if [ -z "$CANDS" ] || [ "$COUNT" -lt 1 ]; then
+  [ -n "$BG_PID" ] && wait "$BG_PID" 2>/dev/null || true
   log err "Нет пригодных socks5 — список мёртв или недоступен"
   exit 1
 fi
