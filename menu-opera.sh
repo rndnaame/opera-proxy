@@ -14,7 +14,8 @@
 #   1.3.14 — [6][8]: [3] Проверить API_PROXY, [4] Отключить
 #   1.3.15 — [6][x] сброс conf: жёстко без API_PROXY (иначе 127.0.0.1:11001 ломает туннель)
 #   1.3.16 — conf: OPTIONS без if-блока; API_PROXY=""; rebuild чистит legacy
-MENU_VERSION="1.3.16"
+#   1.3.17 — Fix show_config: cmdline процесса, а не cat conf
+MENU_VERSION="1.3.17"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -655,7 +656,21 @@ curl_get() {
 }
 
 show_config() {
-  [ -f /opt/etc/opera-proxy.conf ] && log notice "   Параметры: $(cat /opt/etc/opera-proxy.conf)"
+  # Параметры запущенного процесса (не файл conf — conf может отличаться до restart)
+  _pid=$(pgrep -f "[o]pera-proxy" 2>/dev/null | head -1)
+  _cmd=""
+  if [ -n "$_pid" ] && [ -r "/proc/$_pid/cmdline" ]; then
+    _cmd=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')
+  fi
+  if [ -z "$_cmd" ]; then
+    _cmd=$(ps w 2>/dev/null | grep "[o]pera-proxy" | grep -v grep | head -1 \
+      | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
+  fi
+  if [ -n "$_cmd" ]; then
+    log notice "   Процесс (pid ${_pid:-?}): $_cmd"
+  else
+    log notice "   Процесс opera-proxy не найден (не запущен?)"
+  fi
 }
 
 # IFACE по description Opera/OperaProxy → t2sN (сразу, до проверок)
