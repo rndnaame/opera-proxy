@@ -21,7 +21,8 @@
 #   1.3.21 — Fix: понятные русские сообщения в журнале
 #   1.3.22 — Fix: сначала только t2s; SOCKS — лишь если IP через t2s нет
 #   1.3.23 — Fix: при TG fail на t2s — доп. проверка TG через SOCKS :18080
-MENU_VERSION="1.3.23"
+#   1.3.24 — рефакторинг fix_opera_tunnel.sh (структура, имена, main-поток)
+MENU_VERSION="1.3.24"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -622,23 +623,33 @@ fix_opera() {
   echo "→ Обновляем /opt/fix_opera_tunnel.sh ..."
   cat > /opt/fix_opera_tunnel.sh << 'FIXSCRIPT'
 #!/bin/sh
-# Fix Opera tunnel: IP + Telegram; при провале — замена socks5
+# fix_opera_tunnel.sh — диагностика и восстановление туннеля Opera-proxy (Keenetic)
+# Порядок: t2s → (при необходимости) SOCKS → iface up или подбор api-proxy
+# Версия логики совпадает с menu-opera.sh (пункт [3])
+
 TAG="opera-proxy"
 LOG="/var/log/opera-tunnel.log"
-mkdir -p "$(dirname "$LOG")"
+CONF="/opt/etc/opera-proxy.conf"
+CACHE="/opt/etc/opera-s5.cache"
+TEMP="/tmp/s5.raw"
+POOL="/tmp/s5.pool"
+INIT="/opt/etc/init.d/S99opera-proxy"
+BG_PID=""
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+
+# ─── утилиты ───────────────────────────────────────────
 
 log() {
+  # $1=level (err|warn|notice), $2=message
   ts="$(date "+%Y-%m-%d %H:%M:%S")"
   echo "[$ts] $2" | tee -a "$LOG"
   logger -p user."$1" -t "$TAG" "$2" 2>/dev/null || true
 }
 
-# curl_get — скачивание URL (для GitHub — зеркала ghfast/gh-proxy).
-# ВАЖНО: fix-скрипт пишется в файл отдельным heredoc и запускается cron'ом
-# вне контекста menu-opera.sh, поэтому функция продублирована здесь.
 curl_get() {
-  _u="$1"
-  _out="$2"
+  # $1=url $2=outfile — GitHub через зеркала
+  _u="$1"; _out="$2"
   rm -f "$_out"
   if curl -sL -m 12 --connect-timeout 6 -o "$_out" "$_u" 2>/dev/null && [ -s "$_out" ]; then
     return 0
@@ -661,17 +672,93 @@ curl_get() {
   return 1
 }
 
-show_config() {
-  # Краткие флаги запущенного процесса (не весь cmdline)
+is_ipv4() {
+  echo "$1" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
+}
+
+http_ok() {
+  case "$1" in 200|301|302|303|307|308) return 0 ;; *) return 1 ;; esac
+}
+
+cleanup_s5_tmp() {
+  rm -f "$TEMP" "$POOL" /tmp/s5.norm /tmp/s5.pool2 /tmp/s5.bg.done \
+        /tmp/s5.src /tmp/s5.src.* 2>/dev/null || true
+}
+trap cleanup_s5_tmp EXIT INT TERM
+
+# ─── интерфейс ProxyN / t2sN ───────────────────────────
+
+find_iface() {
+  IFACE="Proxy0"
+  _rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
+  _found=$(printf '%s\n' "$_rc" | awk '
+    /^interface Proxy[0-9]+/ { cur=$2 }
+    /description.*(OperaProxy|Opera)/ { print cur; exit }
+  ')
+  [ -n "$_found" ] && IFACE="$_found"
+  _n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9][0-9]*\)$/\1/p')
+  [ -z "$_n" ] && _n=0
+  T2S="t2s$_n"
+}
+
+iface_down() {
+  log notice "$IFACE: выключен (подбор прокси)"
+  ndmc -c "interface $IFACE down" 2>/dev/null || true
+  [ -x "$INIT" ] && "$INIT" stop 2>/dev/null || true
+  killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
+  sleep 2
+}
+
+iface_up() {
+  log notice "$IFACE: включён"
+  ndmc -c "interface $IFACE up" 2>/dev/null || true
+  ndmc -c "system configuration save" 2>/dev/null || true
+  sleep 3
+}
+
+# ─── проверки IP / Telegram ────────────────────────────
+
+resolve_local_socks() {
+  LOCAL_SOCKS="127.0.0.1:18080"
+  if [ -f "$CONF" ]; then
+    _bp=$(sed -n 's/^[[:space:]]*BIND_PORT="\{0,1\}\([0-9]\{1,5\}\)"\{0,1\}.*/\1/p' "$CONF" | head -1)
+    [ -n "$_bp" ] && LOCAL_SOCKS="127.0.0.1:$_bp"
+  fi
+}
+
+# LAST_IP выставляется при успехе check_ip*
+check_ip_t2s() {
+  LAST_IP=$(curl --interface "$T2S" -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
+  is_ipv4 "$LAST_IP"
+}
+
+check_tg_t2s() {
+  _c=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+    -L https://web.telegram.org 2>/dev/null)
+  http_ok "$_c"
+}
+
+check_ip_socks() {
+  LAST_IP=$(curl --socks5-hostname "$LOCAL_SOCKS" -m 10 --connect-timeout 6 -s https://api.ipify.org 2>/dev/null)
+  is_ipv4 "$LAST_IP"
+}
+
+check_tg_socks() {
+  _c=$(curl --socks5-hostname "$LOCAL_SOCKS" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
+    -L https://web.telegram.org 2>/dev/null)
+  http_ok "$_c"
+}
+
+# ─── состояние процесса ────────────────────────────────
+
+show_running() {
   _pid=$(pgrep -f "[o]pera-proxy" 2>/dev/null | head -1)
   _cmd=""
   if [ -n "$_pid" ] && [ -r "/proc/$_pid/cmdline" ]; then
     _cmd=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')
   fi
-  if [ -z "$_cmd" ]; then
-    _cmd=$(ps w 2>/dev/null | grep "[o]pera-proxy" | grep -v grep | head -1 \
-      | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
-  fi
+  [ -z "$_cmd" ] && _cmd=$(ps w 2>/dev/null | grep "[o]pera-proxy" | grep -v grep | head -1 \
+    | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || true)
   if [ -z "$_cmd" ]; then
     log notice "opera-proxy не запущен"
     return
@@ -690,156 +777,10 @@ show_config() {
   log notice "запущен: $_sum"
 }
 
-# IFACE по description Opera/OperaProxy → t2sN (сразу, до проверок)
-IFACE="Proxy0"
-_rc=$(ndmc -c "show running-config" 2>/dev/null || echo "")
-_found=$(printf '%s\n' "$_rc" | awk '
-  /^interface Proxy[0-9]+/ { cur=$2 }
-  /description.*(OperaProxy|Opera)/ { print cur; exit }
-')
-[ -n "$_found" ] && IFACE="$_found"
-_n=$(echo "$IFACE" | sed -n 's/^Proxy\([0-9][0-9]*\)$/\1/p')
-[ -z "$_n" ] && _n=0
-T2S="t2s$_n"
+# ─── списки socks5 ─────────────────────────────────────
 
-# Проверка IP через Keenetic tunnel iface (без логов — сводка выше/ниже)
-check_ip() {
-  LAST_IP=$(curl --interface "$T2S" -m 10 --connect-timeout 6 -s http://api.ipify.org 2>/dev/null)
-  echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
-}
-
-check_telegram() {
-  code=$(curl --interface "$T2S" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
-    -L https://web.telegram.org 2>/dev/null)
-  case "$code" in
-    200|301|302|303|307|308) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-LOCAL_SOCKS="127.0.0.1:$(sed -n 's/^[[:space:]]*BIND_PORT="\{0,1\}\([0-9]\{1,5\}\)"\{0,1\}.*/\1/p' /opt/etc/opera-proxy.conf 2>/dev/null | head -1)"
-[ -z "$LOCAL_SOCKS" ] && LOCAL_SOCKS="127.0.0.1:18080"
-case "$LOCAL_SOCKS" in *:*) : ;; *) LOCAL_SOCKS="127.0.0.1:18080" ;; esac
-check_ip_local() {
-  LAST_IP=$(curl --socks5-hostname "$LOCAL_SOCKS" -m 10 --connect-timeout 6 -s https://api.ipify.org 2>/dev/null)
-  echo "$LAST_IP" | grep -qE "^[0-9]{1,3}(\.[0-9]{1,3}){3}$"
-}
-
-check_telegram_local() {
-  code=$(curl --socks5-hostname "$LOCAL_SOCKS" -s -o /dev/null -w "%{http_code}" -m 12 --connect-timeout 7 \
-    -L https://web.telegram.org 2>/dev/null)
-  case "$code" in
-    200|301|302|303|307|308) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# Без логов (только код возврата)
-tunnel_ok() {
-  check_ip || return 1
-  check_telegram || return 1
-  return 0
-}
-
-socks_ok() {
-  check_ip_local || return 1
-  check_telegram_local || return 1
-  return 0
-}
-
-proxy0_down() {
-  log notice "$IFACE: выключен (подбор прокси)"
-  ndmc -c "interface $IFACE down" 2>/dev/null || true
-  /opt/etc/init.d/S99opera-proxy stop 2>/dev/null || true
-  killall -9 opera-proxy opera-proxy-monitor 2>/dev/null || true
-  sleep 2
-}
-
-proxy0_up() {
-  log notice "$IFACE: включён"
-  ndmc -c "interface $IFACE up" 2>/dev/null || true
-  ndmc -c "system configuration save" 2>/dev/null || true
-  sleep 3
-}
-
-# ── Диагностика ──
-# 1) Сначала только t2s (маршрут Keenetic). Если IP+TG OK — выход, SOCKS не трогаем.
-# 2) IP через t2s есть, Telegram нет — туннель считаем рабочим (TG часто флапает).
-# 3) IP через t2s нет — смотрим локальный SOCKS:
-#    · SOCKS OK → только поднять iface (api-proxy не меняем)
-#    · SOCKS fail → полный подбор api-proxy
-
-_t2s_ip=0; _t2s_tg=0
-check_ip && _t2s_ip=1
-_t2s_ip_val=""; [ "$_t2s_ip" = "1" ] && _t2s_ip_val="$LAST_IP"
-[ "$_t2s_ip" = "1" ] && check_telegram && _t2s_tg=1
-
-if [ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ]; then
-  log notice "проверка $IFACE/$T2S: IP $_t2s_ip_val, Telegram OK"
-  log warn "туннель в порядке"
-  show_config
-  exit 0
-fi
-
-if [ "$_t2s_ip" = "1" ]; then
-  # IP через t2s есть, Telegram нет — уточняем через локальный SOCKS
-  log notice "проверка $IFACE/$T2S: IP $_t2s_ip_val, Telegram нет"
-  if check_telegram_local; then
-    log notice "Telegram через SOCKS $LOCAL_SOCKS: OK (сбой только на t2s)"
-    log warn "туннель в порядке (IP через $T2S есть)"
-  else
-    log notice "Telegram через SOCKS $LOCAL_SOCKS: нет"
-    log warn "туннель частично: IP через $T2S есть, Telegram недоступен (не чиним api-proxy)"
-  fi
-  show_config
-  exit 0
-fi
-
-log notice "проверка $IFACE/$T2S: IP нет — смотрим локальный SOCKS $LOCAL_SOCKS"
-
-_sk_ip=0; _sk_tg=0
-check_ip_local && _sk_ip=1
-_sk_ip_val=""; [ "$_sk_ip" = "1" ] && _sk_ip_val="$LAST_IP"
-[ "$_sk_ip" = "1" ] && check_telegram_local && _sk_tg=1
-
-if [ "$_sk_ip" = "1" ]; then
-  log notice "локальный SOCKS: IP ${_sk_ip_val}, Telegram $([ "$_sk_tg" = "1" ] && echo OK || echo нет)"
-  log notice "opera-proxy работает — поднимаем $IFACE без смены api-proxy"
-  proxy0_up
-  sleep 2
-  if check_ip; then
-    log warn "туннель восстановлен (поднят $IFACE, IP $LAST_IP)"
-    show_config
-    exit 0
-  fi
-  log err "SOCKS жив, но $T2S после включения всё ещё без IP — подбираем api-proxy"
-else
-  log notice "локальный SOCKS: не отвечает"
-  log err "нужен подбор api-proxy"
-fi
-
-proxy0_down
-
-TEMP=/tmp/s5.raw
-POOL=/tmp/s5.pool
-CACHE="/opt/etc/opera-s5.cache"
-BG_PID=""
-
-# Временные файлы подбора — убрать при любом выходе (кэш /opt/etc не трогаем).
-# Фоновый refresh не убиваем: пусть допишет CACHE; свои /tmp почистит сам.
-cleanup_s5_tmp() {
-  rm -f "$TEMP" "$POOL" /tmp/s5.norm /tmp/s5.pool2 /tmp/s5.bg.done \
-        /tmp/s5.src /tmp/s5.src.* 2>/dev/null || true
-}
-trap cleanup_s5_tmp EXIT INT TERM
-
-rm -f "$TEMP" "$POOL" /tmp/s5.norm /tmp/s5.pool2 /tmp/s5.bg.done /tmp/s5.src /tmp/s5.src.*
-: > "$TEMP"
-
-fetch_list() {
-  _url="$1"
-  _label="$2"
-  _tmp="/tmp/s5.src.$$"
+fetch_one_list() {
+  _url="$1"; _tmp="/tmp/s5.src.$$"
   if curl_get "$_url" "$_tmp"; then
     _n=$(grep -cE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' "$_tmp" 2>/dev/null || echo 0)
     if [ "$_n" -gt 0 ] 2>/dev/null; then
@@ -852,18 +793,17 @@ fetch_list() {
   return 1
 }
 
-# Скачать списки → /tmp/s5.norm → CACHE (для фона и sync-fallback)
 refresh_s5_lists() {
   : > "$TEMP"
-  GOT=0
-  fetch_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" "monosans" && GOT=1
-  fetch_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" "proxmint" && GOT=1
-  fetch_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" "proxyscrape≤3s" && GOT=1
-  fetch_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" "jetkai" && GOT=1
-  fetch_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" "relayglass" && GOT=1
-  if [ "$GOT" = "0" ]; then
-    fetch_list "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt" "TheSpeedX" && GOT=1
-    fetch_list "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt" "hookzof" && GOT=1
+  _got=0
+  fetch_one_list "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt" && _got=1
+  fetch_one_list "https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/socks5.txt" && _got=1
+  fetch_one_list "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all" && _got=1
+  fetch_one_list "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt" && _got=1
+  fetch_one_list "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt" && _got=1
+  if [ "$_got" = "0" ]; then
+    fetch_one_list "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt" && _got=1
+    fetch_one_list "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt" && _got=1
   fi
   sed -E 's/\r//g; s|^socks5?h?://||; s/[[:space:]]+//g; s/#.*//' "$TEMP" 2>/dev/null \
     | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' \
@@ -879,47 +819,10 @@ refresh_s5_lists() {
 }
 
 shuffle_pool_from() {
-  # $1 = файл IP:PORT → $POOL (перемешанный)
-  awk 'BEGIN{srand()} {print rand() "\t" $0}' "$1" 2>/dev/null \
-    | sort -n \
-    | cut -f2- > "$POOL"
+  awk 'BEGIN{srand()} {print rand() "\t" $0}' "$1" 2>/dev/null | sort -n | cut -f2- > "$POOL"
 }
 
-# ── Быстрый старт из кэша + обновление списков в фоне ──
-_cache_n=0
-[ -s "$CACHE" ] && _cache_n=$(wc -l < "$CACHE" 2>/dev/null | tr -d ' ')
-
-if [ -n "$_cache_n" ] && [ "$_cache_n" -ge 3 ]; then
-  log notice "берём кэш ($_cache_n адресов), свежий список — в фоне"
-  shuffle_pool_from "$CACHE"
-  (
-    refresh_s5_lists
-    rm -f "$TEMP" /tmp/s5.norm /tmp/s5.src /tmp/s5.src.* /tmp/s5.bg.done 2>/dev/null || true
-  ) >/dev/null 2>&1 &
-  BG_PID=$!
-else
-  log notice "кэша нет — загружаем списки прокси..."
-  if ! refresh_s5_lists; then
-    if [ -s "$CACHE" ]; then
-      log notice "источники недоступны — используем старый кэш"
-      cp "$CACHE" /tmp/s5.norm
-    fi
-  fi
-  if [ ! -s /tmp/s5.norm ] && [ -s "$CACHE" ]; then
-    cp "$CACHE" /tmp/s5.norm
-  fi
-  shuffle_pool_from /tmp/s5.norm
-fi
-
-PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
-
-if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
-  log err "нет списка прокси (сеть недоступна, кэш пуст)"
-  exit 1
-fi
-
-# Быстрая проверка socks5: HTTP, затем HTTPS
-socks5_ok() {
+socks5_alive() {
   _p="$1"
   _code=$(curl -x "socks5h://$_p" -m 3 --connect-timeout 2 -s -o /dev/null -w "%{http_code}" \
     http://api.ipify.org 2>/dev/null)
@@ -930,69 +833,72 @@ socks5_ok() {
   return 1
 }
 
-# Отбор кандидатов из $POOL
+# Результат: COUNT, TESTED, CANDS
 pick_cands() {
-  NEED=3
-  MAX_TEST="${1:-50}"
-  COUNT=0
-  TESTED=0
-  CANDS=""
-  while IFS= read -r p && [ "$COUNT" -lt "$NEED" ] && [ "$TESTED" -lt "$MAX_TEST" ]; do
+  _max="${1:-50}"
+  _need=3
+  COUNT=0; TESTED=0; CANDS=""
+  while IFS= read -r p && [ "$COUNT" -lt "$_need" ] && [ "$TESTED" -lt "$_max" ]; do
     [ -z "$p" ] && continue
     case " $CANDS " in *" $p "*) continue ;; esac
     TESTED=$((TESTED + 1))
-    if socks5_ok "$p"; then
+    if socks5_alive "$p"; then
       COUNT=$((COUNT + 1))
       CANDS="$CANDS $p"
     fi
   done < "$POOL"
-  log notice "отобрано $COUNT из $NEED за $TESTED проверок${CANDS:+ ·$CANDS}"
+  log notice "отобрано $COUNT из $_need за $TESTED проверок${CANDS:+ ·$CANDS}"
 }
 
-log notice "отбор рабочих socks5 (до 50 проверок)..."
-pick_cands 50
-
-if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
-  log notice "в кэше нет живых — ждём обновление списка..."
-  wait "$BG_PID" 2>/dev/null || true
-  BG_PID=""
-  if [ -s "$CACHE" ]; then
+prepare_pool() {
+  # кэш → сразу отбор; свежие списки в фоне. Нет кэша → sync-загрузка.
+  _cn=0
+  [ -s "$CACHE" ] && _cn=$(wc -l < "$CACHE" 2>/dev/null | tr -d ' ')
+  if [ -n "$_cn" ] && [ "$_cn" -ge 3 ]; then
+    log notice "берём кэш ($_cn адресов), свежий список — в фоне"
     shuffle_pool_from "$CACHE"
-    pick_cands 50
+    (
+      refresh_s5_lists
+      rm -f "$TEMP" /tmp/s5.norm /tmp/s5.src /tmp/s5.src.* 2>/dev/null || true
+    ) >/dev/null 2>&1 &
+    BG_PID=$!
+  else
+    log notice "кэша нет — загружаем списки прокси..."
+    if ! refresh_s5_lists; then
+      [ -s "$CACHE" ] && {
+        log notice "источники недоступны — используем старый кэш"
+        cp "$CACHE" /tmp/s5.norm
+      }
+    fi
+    [ ! -s /tmp/s5.norm ] && [ -s "$CACHE" ] && cp "$CACHE" /tmp/s5.norm
+    shuffle_pool_from /tmp/s5.norm
   fi
-elif [ "$COUNT" -lt 1 ]; then
-  log notice "повторный отбор (+50 адресов)..."
-  tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
-  if [ -s /tmp/s5.pool2 ]; then
-    POOL=/tmp/s5.pool2
-    pick_cands 50
+  PROXY_COUNT=$(wc -l < "$POOL" 2>/dev/null | tr -d ' ')
+  if [ -z "$PROXY_COUNT" ] || [ "$PROXY_COUNT" -lt 3 ]; then
+    log err "нет списка прокси (сеть недоступна, кэш пуст)"
+    return 1
   fi
-fi
+  return 0
+}
 
-if [ -z "$CANDS" ] || [ "$COUNT" -lt 1 ]; then
-  [ -n "$BG_PID" ] && wait "$BG_PID" 2>/dev/null || true
-  log err "не найдено рабочих socks5"
-  exit 1
-fi
+# ─── применить api-proxy и перезапуск ──────────────────
 
-# Собрать OPTIONS из conf + -api-proxy (не затирать SNI/DoH)
-start() {
-  _extra="$1"
-  CONF=/opt/etc/opera-proxy.conf
+apply_api_proxy() {
+  # $1 = IP:PORT
+  _extra="-api-proxy socks5://$1"
   if [ -f "$CONF" ] && grep -q 'COUNTRY=\|fake-SNI\|BOOTSTRAP_DNS' "$CONF" 2>/dev/null; then
-    # убрать старый -api-proxy из conf, пересобрать
-    COUNTRY="EU"; BIND_ADDR="127.0.0.1"; BIND_PORT="18080"
-    OBFUSCATE="yes"; FAKE_SNI="2gis.com"
-    BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
-    SERVER_SELECT="random"; VERBOSITY="30"
-    # shellcheck: source conf vars
-    # извлекаем значения без выполнения if/OPTIONS
-    eval "$(grep -E '^(COUNTRY|BIND_ADDR|BIND_PORT|OBFUSCATE|FAKE_SNI|BOOTSTRAP_DNS|SERVER_SELECT|VERBOSITY)=' "$CONF" 2>/dev/null)"
+    COUNTRY=$(sed -n 's/^COUNTRY="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$COUNTRY" ] && COUNTRY="EU"
+    BIND_ADDR=$(sed -n 's/^BIND_ADDR="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$BIND_ADDR" ] && BIND_ADDR="127.0.0.1"
+    BIND_PORT=$(sed -n 's/^BIND_PORT="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$BIND_PORT" ] && BIND_PORT="18080"
+    OBFUSCATE=$(sed -n 's/^OBFUSCATE="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$OBFUSCATE" ] && OBFUSCATE="yes"
+    FAKE_SNI=$(sed -n 's/^FAKE_SNI="\([^"]*\)".*/\1/p' "$CONF" | head -1)
+    BOOTSTRAP_DNS=$(sed -n 's/^BOOTSTRAP_DNS="\([^"]*\)".*/\1/p' "$CONF" | head -1)
+    [ -z "$BOOTSTRAP_DNS" ] && BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
+    SERVER_SELECT=$(sed -n 's/^SERVER_SELECT="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$SERVER_SELECT" ] && SERVER_SELECT="random"
+    VERBOSITY=$(sed -n 's/^VERBOSITY="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$VERBOSITY" ] && VERBOSITY="30"
     OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
     [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ] && OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
-    [ -n "$_extra" ] && OPTIONS="$OPTIONS $_extra"
-    # сохранить conf с актуальным OPTIONS (+ API_PROXY отдельной переменной)
-    _api_w=$(printf '%s' "$_extra" | sed 's/^-api-proxy[[:space:]]*//;s#^socks5://##')
+    OPTIONS="$OPTIONS $_extra"
     {
       echo "# auto by fix_opera_tunnel"
       echo "COUNTRY=\"$COUNTRY\""
@@ -1003,46 +909,140 @@ start() {
       echo "BOOTSTRAP_DNS=\"$BOOTSTRAP_DNS\""
       echo "SERVER_SELECT=\"$SERVER_SELECT\""
       echo "VERBOSITY=\"$VERBOSITY\""
-      [ -n "$_api_w" ] && echo "API_PROXY=\"$_api_w\""
+      echo "API_PROXY=\"$1\""
       echo "OPTIONS=\"$OPTIONS\""
     } > "$CONF"
   else
     echo "OPTIONS=\"-socks-mode -country EU -bind-address 127.0.0.1:18080 $_extra\"" > "$CONF"
   fi
-  /opt/etc/init.d/S99opera-proxy stop 2>/dev/null
-  killall -9 opera-proxy 2>/dev/null
+  [ -x "$INIT" ] && "$INIT" stop 2>/dev/null || true
+  killall -9 opera-proxy 2>/dev/null || true
   sleep 2
-  /opt/etc/init.d/S99opera-proxy start
+  [ -x "$INIT" ] && "$INIT" start 2>/dev/null || true
 }
 
-# IFACE остаётся down; проверка через local SOCKS :18080
-SUCCESS=0
-for p in $CANDS; do
-  [ -z "$p" ] && continue
-  log notice "пробуем api-proxy $p"
-  start "-api-proxy socks5://$p"
-  sleep 6
-  i=1
-  while [ "$i" -le 6 ]; do
-    if check_ip_local; then
-      if check_telegram_local; then
+try_candidates() {
+  for p in $CANDS; do
+    [ -z "$p" ] && continue
+    log notice "пробуем api-proxy $p"
+    apply_api_proxy "$p"
+    sleep 6
+    i=1
+    while [ "$i" -le 6 ]; do
+      if check_ip_socks && check_tg_socks; then
         log warn "успех: api-proxy $p · IP $LAST_IP · Telegram OK"
-        show_config
-        proxy0_up
+        show_running
+        iface_up
         ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null
         ndmc -c "system configuration save" 2>/dev/null
-        SUCCESS=1
-        exit 0
+        return 0
       fi
-    fi
-    sleep 2
-    i=$((i + 1))
+      sleep 2
+      i=$((i + 1))
+    done
+    log notice "не подошёл: $p"
   done
-  log notice "не подошёл: $p"
-done
+  return 1
+}
 
-log err "не удалось восстановить туннель ($IFACE остаётся выключен)"
-exit 1
+# ─── полный recovery: подбор api-proxy ─────────────────
+
+recover_api_proxy() {
+  iface_down
+  if ! prepare_pool; then
+    return 1
+  fi
+  log notice "отбор рабочих socks5 (до 50 проверок)..."
+  pick_cands 50
+
+  if [ "$COUNT" -lt 1 ] && [ -n "$BG_PID" ]; then
+    log notice "в кэше нет живых — ждём обновление списка..."
+    wait "$BG_PID" 2>/dev/null || true
+    BG_PID=""
+    if [ -s "$CACHE" ]; then
+      shuffle_pool_from "$CACHE"
+      pick_cands 50
+    fi
+  elif [ "$COUNT" -lt 1 ]; then
+    log notice "повторный отбор (+50 адресов)..."
+    tail -n +$((TESTED + 1)) "$POOL" > /tmp/s5.pool2 2>/dev/null || true
+    if [ -s /tmp/s5.pool2 ]; then
+      POOL=/tmp/s5.pool2
+      pick_cands 50
+    fi
+  fi
+
+  if [ -z "$CANDS" ] || [ "$COUNT" -lt 1 ]; then
+    [ -n "$BG_PID" ] && wait "$BG_PID" 2>/dev/null || true
+    log err "не найдено рабочих socks5"
+    return 1
+  fi
+
+  try_candidates || {
+    log err "не удалось восстановить туннель ($IFACE остаётся выключен)"
+    return 1
+  }
+  return 0
+}
+
+# ─── main ──────────────────────────────────────────────
+
+find_iface
+resolve_local_socks
+
+# 1) t2s: IP + Telegram
+_t2s_ip=0; _t2s_tg=0
+check_ip_t2s && _t2s_ip=1
+_t2s_ip_val=""; [ "$_t2s_ip" = "1" ] && _t2s_ip_val="$LAST_IP"
+[ "$_t2s_ip" = "1" ] && check_tg_t2s && _t2s_tg=1
+
+if [ "$_t2s_ip" = "1" ] && [ "$_t2s_tg" = "1" ]; then
+  log notice "проверка $IFACE/$T2S: IP $_t2s_ip_val, Telegram OK"
+  log warn "туннель в порядке"
+  show_running
+  exit 0
+fi
+
+# 2) IP через t2s есть, Telegram нет → уточнить TG через SOCKS
+if [ "$_t2s_ip" = "1" ]; then
+  log notice "проверка $IFACE/$T2S: IP $_t2s_ip_val, Telegram нет"
+  if check_tg_socks; then
+    log notice "Telegram через SOCKS $LOCAL_SOCKS: OK (сбой только на t2s)"
+    log warn "туннель в порядке (IP через $T2S есть)"
+  else
+    log notice "Telegram через SOCKS $LOCAL_SOCKS: нет"
+    log warn "туннель частично: IP через $T2S есть, Telegram недоступен (не чиним api-proxy)"
+  fi
+  show_running
+  exit 0
+fi
+
+# 3) IP через t2s нет → локальный SOCKS
+log notice "проверка $IFACE/$T2S: IP нет — смотрим локальный SOCKS $LOCAL_SOCKS"
+_sk_ip=0; _sk_tg=0
+check_ip_socks && _sk_ip=1
+_sk_ip_val=""; [ "$_sk_ip" = "1" ] && _sk_ip_val="$LAST_IP"
+[ "$_sk_ip" = "1" ] && check_tg_socks && _sk_tg=1
+
+if [ "$_sk_ip" = "1" ]; then
+  log notice "локальный SOCKS: IP ${_sk_ip_val}, Telegram $([ "$_sk_tg" = "1" ] && echo OK || echo нет)"
+  log notice "opera-proxy работает — поднимаем $IFACE без смены api-proxy"
+  iface_up
+  sleep 2
+  if check_ip_t2s; then
+    log warn "туннель восстановлен (поднят $IFACE, IP $LAST_IP)"
+    show_running
+    exit 0
+  fi
+  log err "SOCKS жив, но $T2S после включения всё ещё без IP — подбираем api-proxy"
+else
+  log notice "локальный SOCKS: не отвечает"
+  log err "нужен подбор api-proxy"
+fi
+
+recover_api_proxy
+exit $?
+
 FIXSCRIPT
 
   chmod +x /opt/fix_opera_tunnel.sh
