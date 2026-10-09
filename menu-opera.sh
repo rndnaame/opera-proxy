@@ -30,7 +30,8 @@
 #   1.3.30 — [3] fix-скрипт на flash только если изменился (cmp)
 #   1.3.31 — Fix: refresh socks5 только если кэш <300 или старше 6 ч
 #   1.3.32 — Fix recovery: 3 раунда, до 5 кандидатов×80, пропуск уже пробованных
-MENU_VERSION="1.3.32"
+#   1.3.33 — PING_CHECK: default | custom (профиль=IFACE, 9.9.9.9:53)
+MENU_VERSION="1.3.33"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -345,12 +346,53 @@ opera_iface_exists() {
   ' 2>/dev/null
 }
 
+# Применить ping-check к $IFACE. $1 = default|custom (или из conf PING_CHECK)
+apply_ping_check() {
+  _mode="${1:-}"
+  [ -z "$_mode" ] && _mode=$(conf_get PING_CHECK 2>/dev/null)
+  [ -z "$_mode" ] && _mode="default"
+  _if="${IFACE:-Proxy0}"
+  command -v ndmc >/dev/null 2>&1 || return 1
+  case "$_mode" in
+    custom|iface|"$_if")
+      echo "   ping-check: профиль $_if → 9.9.9.9:53 (connect, 15с, max-fails 5)"
+      ndmc -c "ping-check profile $_if" 2>/dev/null || true
+      ndmc -c "ping-check profile $_if host 9.9.9.9" 2>/dev/null || true
+      ndmc -c "ping-check profile $_if port 53" 2>/dev/null || true
+      ndmc -c "ping-check profile $_if update-interval 15" 2>/dev/null || true
+      ndmc -c "ping-check profile $_if mode connect" 2>/dev/null || true
+      ndmc -c "ping-check profile $_if max-fails 5" 2>/dev/null || true
+      ndmc -c "interface $_if ping-check profile $_if" 2>/dev/null || true
+      conf_set PING_CHECK "custom" 2>/dev/null || true
+      ;;
+    *)
+      echo "   ping-check: профиль default"
+      ndmc -c "interface $_if ping-check profile default" 2>/dev/null || true
+      conf_set PING_CHECK "default" 2>/dev/null || true
+      ;;
+  esac
+}
+
+# Спросить и применить ping-check (установка / меню)
+ask_ping_check() {
+  echo ""
+  echo "Ping-check для интерфейса $IFACE:"
+  echo "  [1] default — стандартный профиль Keenetic"
+  echo "  [2] свой   — профиль «$IFACE»: host 9.9.9.9 port 53, interval 15с, mode connect, max-fails 5"
+  echo "  [0] пропустить"
+  ask "Выбор [1]: " "1"
+  case "$REPLY" in
+    2) apply_ping_check custom ;;
+    0) echo "   ping-check: пропущен" ;;
+    *) apply_ping_check default ;;
+  esac
+}
+
 configure_proxy0() {
   echo ""
   find_opera_iface
   _bind="${BIND_PORT_DEFAULT}"
   if [ -f "$OP_CONF_FILE" ]; then
-    # shellcheck: extract BIND_PORT
     _bp=$(sed -n 's/^BIND_PORT="\([^"]*\)".*/\1/p' "$OP_CONF_FILE" | head -1)
     [ -n "$_bp" ] && _bind="$_bp"
   fi
@@ -373,6 +415,7 @@ configure_proxy0() {
     ndmc -c "interface $IFACE ip global auto" 2>/dev/null || true
     ndmc -c "interface $IFACE description $IFACE_DESC" 2>/dev/null || true
     ndmc -c "interface $IFACE up" 2>/dev/null || true
+    ask_ping_check
     ndmc -c "system configuration save" 2>/dev/null || true
     echo "   ✓ $IFACE настроен (description=$IFACE_DESC, socks5-udp off)"
   else
@@ -1038,7 +1081,19 @@ try_candidates() {
         log warn "успех: api-proxy $p · IP $LAST_IP · Telegram OK"
         show_running
         iface_up nosave
-        ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null || true
+        # ping-check: default или custom (имя = IFACE) из conf
+        _pcm=$(sed -n 's/^PING_CHECK="\([^"]*\)".*/\1/p' "$CONF" 2>/dev/null | head -1)
+        if [ "$_pcm" = "custom" ]; then
+          ndmc -c "ping-check profile $IFACE" 2>/dev/null || true
+          ndmc -c "ping-check profile $IFACE host 9.9.9.9" 2>/dev/null || true
+          ndmc -c "ping-check profile $IFACE port 53" 2>/dev/null || true
+          ndmc -c "ping-check profile $IFACE update-interval 15" 2>/dev/null || true
+          ndmc -c "ping-check profile $IFACE mode connect" 2>/dev/null || true
+          ndmc -c "ping-check profile $IFACE max-fails 5" 2>/dev/null || true
+          ndmc -c "interface $IFACE ping-check profile $IFACE" 2>/dev/null || true
+        else
+          ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null || true
+        fi
         ndmc -c "system configuration save" 2>/dev/null || true
         return 0
       fi
@@ -1677,6 +1732,9 @@ VERBOSITY="30"
 # socks5-апстрим для API Opera (пусто = напрямую). Пример: 1.2.3.4:1080
 API_PROXY=""
 
+# Ping-check интерфейса: default | custom (профиль = имя ProxyN → 9.9.9.9:53)
+PING_CHECK="default"
+
 # ── OPTIONS для Entware init.d / rc.func (пересобирается меню при изменениях) ──
 OPTIONS="-socks-mode -country EU -bind-address 127.0.0.1:18080 -server-selection random -verbosity 30 -bootstrap-dns https://dns.google/dns-query,https://1.1.1.1/dns-query -fake-SNI 2gis.com"
 '
@@ -1969,6 +2027,7 @@ config_menu() {
     _doh=$(conf_get BOOTSTRAP_DNS);        [ -z "$_doh" ] && _doh="https://dns.google/dns-query,https://1.1.1.1/dns-query"
     _srvsel=$(conf_get SERVER_SELECT);     [ -z "$_srvsel" ] && _srvsel="random"
     _verb=$(conf_get VERBOSITY);           [ -z "$_verb" ] && _verb="30"
+    _ping=$(conf_get PING_CHECK);          [ -z "$_ping" ] && _ping="default"
 
     printf '%b\n' "${light_blue}────────── Текущий конфиг ──────────${reset}"
     printf "  %-14s: %b%s%b   (EU | AS | AM)\n" "COUNTRY" "$bold" "$_country" "$reset"
@@ -1985,6 +2044,11 @@ config_menu() {
     else
       printf "  %-14s: %b(не задан — прямое подключение)%b\n" "API_PROXY" "$light_blue" "$reset"
     fi
+    if [ "$_ping" = "custom" ]; then
+      printf "  %-14s: %bcustom%b  (профиль = имя ProxyN → 9.9.9.9:53)\n" "PING_CHECK" "$bold" "$reset"
+    else
+      printf "  %-14s: %bdefault%b\n" "PING_CHECK" "$bold" "$reset"
+    fi
     echo ""
     printf '%b\n' "${light_blue}──────────────────────────────────────${reset}"
     echo ""
@@ -1996,6 +2060,7 @@ config_menu() {
     echo "  [6] Изменить SERVER_SELECT"
     echo "  [7] Изменить VERBOSITY"
     echo "  [8] Изменить API_PROXY (socks5-апстрим)"
+    echo "  [9] Изменить PING_CHECK (проверка канала)"
     echo "  [l] Показать конфиг целиком"
     echo "  [s] Сохранить + перезапустить сервис"
     echo "  [x] Сбросить к конфигу по умолчанию"
@@ -2004,7 +2069,7 @@ config_menu() {
     printf '%b\n' "${light_blue}OPTIONS пересобирается автоматически при каждом изменении${reset}"
     echo ""
 
-ask "Выбор [1-8 / l / s / x / 0]: " "0"
+ask "Выбор [1-9 / l / s / x / 0]: " "0"
 _cc=$REPLY
     case "$_cc" in
       1)
@@ -2241,6 +2306,31 @@ _cc=$REPLY
             ;;
           *)
             printf '%b⚠ Неверный выбор: %s (нужно 1-4 или 0)%b\n' "$red" "$_v" "$reset"
+            ;;
+        esac
+        sleep 2
+        ;;
+      9)
+        echo ""
+        find_opera_iface 2>/dev/null || IFACE="Proxy0"
+        echo "Ping-check для $IFACE (текущее: ${_ping:-default}):"
+        echo "  [1] default — стандартный профиль Keenetic"
+        echo "  [2] custom  — профиль «$IFACE»: 9.9.9.9:53, interval 15с, mode connect, max-fails 5"
+        echo "  [0] Отмена"
+        ask "Ваш выбор: " "0"
+        case "$REPLY" in
+          1)
+            apply_ping_check default
+            ndmc -c "system configuration save" 2>/dev/null || true
+            printf '%b✓ PING_CHECK=default%b\n' "$green" "$reset"
+            ;;
+          2)
+            apply_ping_check custom
+            ndmc -c "system configuration save" 2>/dev/null || true
+            printf '%b✓ PING_CHECK=custom (профиль %s)%b\n' "$green" "$IFACE" "$reset"
+            ;;
+          *)
+            echo "   Отменено."
             ;;
         esac
         sleep 2
