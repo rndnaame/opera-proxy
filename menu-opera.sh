@@ -31,7 +31,8 @@
 #   1.3.31 — Fix: refresh socks5 только если кэш <300 или старше 6 ч
 #   1.3.32 — Fix recovery: 3 раунда, до 5 кандидатов×80, пропуск уже пробованных
 #   1.3.33 — PING_CHECK: default | custom (профиль=IFACE, 9.9.9.9:53)
-MENU_VERSION="1.3.33"
+#   1.3.34 — Fix: apply_api_proxy сохраняет PING_CHECK (не сбрасывает в default)
+MENU_VERSION="1.3.34"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1030,8 +1031,31 @@ prepare_pool() {
 
 # ─── применить api-proxy и перезапуск ──────────────────
 
+# Сохранить PING_CHECK до перезаписи conf (apply_api_proxy не должен его терять)
+read_ping_check() {
+  PING_CHECK_MODE=$(sed -n 's/^PING_CHECK="\([^"]*\)".*/\1/p' "$CONF" 2>/dev/null | head -1)
+  [ -z "$PING_CHECK_MODE" ] && PING_CHECK_MODE="default"
+}
+
+apply_ping_check_ndmc() {
+  # использует IFACE и PING_CHECK_MODE
+  if [ "$PING_CHECK_MODE" = "custom" ]; then
+    log notice "ping-check: профиль $IFACE (9.9.9.9:53)"
+    ndmc -c "ping-check profile $IFACE" 2>/dev/null || true
+    ndmc -c "ping-check profile $IFACE host 9.9.9.9" 2>/dev/null || true
+    ndmc -c "ping-check profile $IFACE port 53" 2>/dev/null || true
+    ndmc -c "ping-check profile $IFACE update-interval 15" 2>/dev/null || true
+    ndmc -c "ping-check profile $IFACE mode connect" 2>/dev/null || true
+    ndmc -c "ping-check profile $IFACE max-fails 5" 2>/dev/null || true
+    ndmc -c "interface $IFACE ping-check profile $IFACE" 2>/dev/null || true
+  else
+    log notice "ping-check: профиль default"
+    ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null || true
+  fi
+}
+
 apply_api_proxy() {
-  # $1 = IP:PORT
+  # $1 = IP:PORT — перезаписывает conf, сохраняя PING_CHECK
   _extra="-api-proxy socks5://$1"
   if [ -f "$CONF" ] && grep -q 'COUNTRY=\|fake-SNI\|BOOTSTRAP_DNS' "$CONF" 2>/dev/null; then
     COUNTRY=$(sed -n 's/^COUNTRY="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$COUNTRY" ] && COUNTRY="EU"
@@ -1043,6 +1067,9 @@ apply_api_proxy() {
     [ -z "$BOOTSTRAP_DNS" ] && BOOTSTRAP_DNS="https://dns.google/dns-query,https://1.1.1.1/dns-query"
     SERVER_SELECT=$(sed -n 's/^SERVER_SELECT="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$SERVER_SELECT" ] && SERVER_SELECT="random"
     VERBOSITY=$(sed -n 's/^VERBOSITY="\([^"]*\)".*/\1/p' "$CONF" | head -1); [ -z "$VERBOSITY" ] && VERBOSITY="30"
+    # сохранить PING_CHECK до перезаписи
+    _pc=$(sed -n 's/^PING_CHECK="\([^"]*\)".*/\1/p' "$CONF" | head -1)
+    [ -z "$_pc" ] && _pc="${PING_CHECK_MODE:-default}"
     OPTIONS="-socks-mode -country $COUNTRY -bind-address ${BIND_ADDR}:${BIND_PORT} -server-selection $SERVER_SELECT -verbosity $VERBOSITY -bootstrap-dns $BOOTSTRAP_DNS"
     [ "$OBFUSCATE" = "yes" ] && [ -n "$FAKE_SNI" ] && OPTIONS="$OPTIONS -fake-SNI $FAKE_SNI"
     OPTIONS="$OPTIONS $_extra"
@@ -1057,10 +1084,16 @@ apply_api_proxy() {
       echo "SERVER_SELECT=\"$SERVER_SELECT\""
       echo "VERBOSITY=\"$VERBOSITY\""
       echo "API_PROXY=\"$1\""
+      echo "PING_CHECK=\"$_pc\""
       echo "OPTIONS=\"$OPTIONS\""
     } > "$CONF"
   else
-    echo "OPTIONS=\"-socks-mode -country EU -bind-address 127.0.0.1:18080 $_extra\"" > "$CONF"
+    _pc="${PING_CHECK_MODE:-default}"
+    {
+      echo "API_PROXY=\"$1\""
+      echo "PING_CHECK=\"$_pc\""
+      echo "OPTIONS=\"-socks-mode -country EU -bind-address 127.0.0.1:18080 $_extra\""
+    } > "$CONF"
   fi
   [ -x "$INIT" ] && "$INIT" stop 2>/dev/null || true
   killall -9 opera-proxy 2>/dev/null || true
@@ -1069,6 +1102,8 @@ apply_api_proxy() {
 }
 
 try_candidates() {
+  # PING_CHECK читаем один раз до любых перезаписей conf
+  read_ping_check
   for p in $CANDS; do
     [ -z "$p" ] && continue
     case " $TRIED_API " in *" $p "*) continue ;; esac
@@ -1081,19 +1116,7 @@ try_candidates() {
         log warn "успех: api-proxy $p · IP $LAST_IP · Telegram OK"
         show_running
         iface_up nosave
-        # ping-check: default или custom (имя = IFACE) из conf
-        _pcm=$(sed -n 's/^PING_CHECK="\([^"]*\)".*/\1/p' "$CONF" 2>/dev/null | head -1)
-        if [ "$_pcm" = "custom" ]; then
-          ndmc -c "ping-check profile $IFACE" 2>/dev/null || true
-          ndmc -c "ping-check profile $IFACE host 9.9.9.9" 2>/dev/null || true
-          ndmc -c "ping-check profile $IFACE port 53" 2>/dev/null || true
-          ndmc -c "ping-check profile $IFACE update-interval 15" 2>/dev/null || true
-          ndmc -c "ping-check profile $IFACE mode connect" 2>/dev/null || true
-          ndmc -c "ping-check profile $IFACE max-fails 5" 2>/dev/null || true
-          ndmc -c "interface $IFACE ping-check profile $IFACE" 2>/dev/null || true
-        else
-          ndmc -c "interface $IFACE ping-check profile default" 2>/dev/null || true
-        fi
+        apply_ping_check_ndmc
         ndmc -c "system configuration save" 2>/dev/null || true
         return 0
       fi
