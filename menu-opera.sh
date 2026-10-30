@@ -32,7 +32,8 @@
 #   1.3.32 — Fix recovery: 3 раунда, до 5 кандидатов×80, пропуск уже пробованных
 #   1.3.33 — PING_CHECK: default | custom (профиль=IFACE, 9.9.9.9:53)
 #   1.3.34 — Fix: apply_api_proxy сохраняет PING_CHECK (не сбрасывает в default)
-MENU_VERSION="1.3.34"
+#   1.3.35 — install: --force-downgrade при понижении версии (1.31→1.30)
+MENU_VERSION="1.3.35"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -477,6 +478,16 @@ fetch_upx_meta() {
 # ---------------------------------------------------------------------------
 # [1] Установить Opera-proxy (подменю)
 # ---------------------------------------------------------------------------
+# Сравнение версий opkg (1.31.0-1 > 1.30.0-1). 0 = $1 строго новее $2
+ver_gt() {
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ] && \
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+}
+
+pkg_installed_ver() {
+  opkg list-installed opera-proxy 2>/dev/null | awk '{print $3; exit}'
+}
+
 do_install_official() {
   echo ""
   echo "→ Добавление репозитория sw.ext.io ..."
@@ -488,20 +499,38 @@ do_install_official() {
   echo "→ opkg update ..."
   opkg update || echo "⚠ opkg update завершился с ошибкой (продолжаем)"
 
-  echo ""
-  if opkg list-installed 2>/dev/null | grep -q '^opera-proxy '; then
-    echo "→ Обновление пакета opera-proxy (без переустановки) ..."
-  else
-    echo "→ Установка пакета opera-proxy ..."
-  fi
-  # без --force-reinstall: opkg сам обновит, не удаляя «с нуля»
-  if opkg install opera-proxy; then
-    echo "✅ Готово"
-  else
-    echo "❌ Не удалось установить/обновить opera-proxy"
-    return 1
-  fi
+  _iv=$(pkg_installed_ver)
+  _want="${MIRROR_VER:-}"
+  [ -z "$_want" ] && _want=$(fetch_mirror_ver "$ARCH")
 
+  echo ""
+  if [ -z "$_iv" ]; then
+    echo "→ Установка пакета opera-proxy${_want:+ ($_want)} ..."
+    if opkg install opera-proxy; then
+      echo "✅ Готово"
+    else
+      echo "❌ Не удалось установить opera-proxy"
+      return 1
+    fi
+  elif [ -n "$_want" ] && ver_gt "$_iv" "$_want"; then
+    echo "→ Понижение версии $_iv → $_want (--force-downgrade) ..."
+    if opkg install --force-downgrade "opera-proxy=$_want" 2>/dev/null || \
+       opkg install --force-downgrade opera-proxy; then
+      echo "✅ Готово (downgrade)"
+    else
+      echo "❌ Не удалось понизить opera-proxy"
+      return 1
+    fi
+  else
+    echo "→ Обновление пакета opera-proxy${_want:+ ($_want)} ..."
+    if opkg install opera-proxy; then
+      # opkg мог сказать «up to date» при той же/новой версии — ок
+      echo "✅ Готово"
+    else
+      echo "❌ Не удалось установить/обновить opera-proxy"
+      return 1
+    fi
+  fi
   echo ""
   echo "→ Конфиг opera-proxy (SNI/DoH/COUNTRY) ..."
   write_opera_conf
@@ -556,20 +585,23 @@ do_install_upx() {
   fi
   echo "   ✓ $(du -h "$TMP_IPK" | awk '{print $1}')"
 
+  _iv=$(pkg_installed_ver)
   echo ""
-  if opkg list-installed 2>/dev/null | grep -q '^opera-proxy '; then
-    echo "→ Обновление $UPX_IPK (без force-reinstall) ..."
-  else
+  if [ -z "$_iv" ]; then
     echo "→ Установка $UPX_IPK ..."
+    _opkg_flags=""
+  elif [ -n "$UPX_VER" ] && ver_gt "$_iv" "$UPX_VER"; then
+    echo "→ Понижение $_iv → $UPX_VER ($UPX_IPK, --force-downgrade) ..."
+    _opkg_flags="--force-downgrade"
+  else
+    echo "→ Установка/обновление $UPX_IPK ..."
+    _opkg_flags=""
   fi
-  # обычный install: при новой версии — upgrade; при той же — opkg может отказать
-  if opkg install "$TMP_IPK"; then
+  if opkg install $_opkg_flags "$TMP_IPK"; then
     echo "✅ Готово (UPX)"
   else
-    # та же версия — мягкая переустановка только по согласию не делаем; пробуем --force-reinstall
-    # только если версии совпали и install отказал
-    echo "⚠ Обычная установка не прошла, пробуем обновление пакета ..."
-    if opkg install --force-reinstall "$TMP_IPK"; then
+    echo "⚠ Обычная установка не прошла, пробуем --force-reinstall / --force-downgrade ..."
+    if opkg install --force-reinstall --force-downgrade "$TMP_IPK"; then
       echo "✅ Готово (UPX, reinstall)"
     else
       echo "❌ opkg install не удался"
