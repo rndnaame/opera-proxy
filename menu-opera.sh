@@ -33,7 +33,8 @@
 #   1.3.33 — PING_CHECK: default | custom (профиль=IFACE, 9.9.9.9:53)
 #   1.3.34 — Fix: apply_api_proxy сохраняет PING_CHECK (не сбрасывает в default)
 #   1.3.35 — install: --force-downgrade при понижении версии (1.31→1.30)
-MENU_VERSION="1.3.35"
+#   1.3.36 — official: скачивание IPK с sw.ext.io + force-downgrade (pin= не работает)
+MENU_VERSION="1.3.36"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -447,13 +448,25 @@ check_tunnel_quick() {
   fi
 }
 
-# Версия на sw.ext.io (для ARCH)
+# Версия / имя IPK на sw.ext.io (для ARCH). Выставляет MIRROR_VER, MIRROR_IPK
 fetch_mirror_ver() {
   _arch="$1"
-  curl -sL --connect-timeout 10 --max-time 20 "https://sw.ext.io/ent/${_arch}/" 2>/dev/null \
-    | grep -oE "opera-proxy_[0-9][^\"'<> ]+_" \
-    | sed 's/^opera-proxy_//;s/_$//' \
-    | sort -V | tail -1
+  MIRROR_IPK=""
+  MIRROR_VER=""
+  _list=$(curl -sL --connect-timeout 10 --max-time 20 "http://sw.ext.io/ent/${_arch}/" 2>/dev/null \
+    || curl -sL --connect-timeout 10 --max-time 20 "https://sw.ext.io/ent/${_arch}/" 2>/dev/null || true)
+  # предпочитаем IPK под текущий IPK_SUFFIX, иначе любой opera-proxy_*.ipk
+  if [ -n "$IPK_SUFFIX" ]; then
+    MIRROR_IPK=$(printf '%s\n' "$_list" \
+      | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}\\.ipk" \
+      | sort -V | tail -1)
+  fi
+  [ -z "$MIRROR_IPK" ] && MIRROR_IPK=$(printf '%s\n' "$_list" \
+    | grep -oE "opera-proxy_[0-9][^\"'<> ]+\\.ipk" \
+    | grep -v compressed | sort -V | tail -1)
+  [ -n "$MIRROR_IPK" ] && MIRROR_VER=$(echo "$MIRROR_IPK" | sed -n 's/^opera-proxy_\([^_]*\)_.*/\1/p')
+  # совместимость: печатаем версию (как раньше вызывали $(fetch_mirror_ver ...))
+  echo "$MIRROR_VER"
 }
 
 # Версия UPX-релиза (rndnaame/opera-proxy)
@@ -500,41 +513,77 @@ do_install_official() {
   opkg update || echo "⚠ opkg update завершился с ошибкой (продолжаем)"
 
   _iv=$(pkg_installed_ver)
+  [ -z "$MIRROR_VER" ] || [ -z "$MIRROR_IPK" ] && fetch_mirror_ver "$ARCH" >/dev/null
   _want="${MIRROR_VER:-}"
-  [ -z "$_want" ] && _want=$(fetch_mirror_ver "$ARCH")
+  _ipk="${MIRROR_IPK:-}"
 
-  echo ""
-  if [ -z "$_iv" ]; then
-    echo "→ Установка пакета opera-proxy${_want:+ ($_want)} ..."
-    if opkg install opera-proxy; then
-      echo "✅ Готово"
+  # Надёжный путь: скачать конкретный IPK (pin version на Entware часто не работает)
+  if [ -n "$_ipk" ]; then
+    _url="http://sw.ext.io/ent/${ARCH}/${_ipk}"
+    _tmp="/tmp/${_ipk}"
+    echo ""
+    echo "→ Скачивание $_ipk ..."
+    rm -f "$_tmp"
+    if curl -fL --connect-timeout 15 --max-time 90 -o "$_tmp" "$_url" 2>/dev/null && [ -s "$_tmp" ]; then
+      echo "   ✓ $(du -h "$_tmp" 2>/dev/null | awk '{print $1}')"
     else
-      echo "❌ Не удалось установить opera-proxy"
-      return 1
-    fi
-  elif [ -n "$_want" ] && ver_gt "$_iv" "$_want"; then
-    echo "→ Понижение версии $_iv → $_want (--force-downgrade) ..."
-    if opkg install --force-downgrade "opera-proxy=$_want" 2>/dev/null || \
-       opkg install --force-downgrade opera-proxy; then
-      echo "✅ Готово (downgrade)"
-    else
-      echo "❌ Не удалось понизить opera-proxy"
-      return 1
+      echo "⚠ curl не скачал — пробуем opkg из репозитория"
+      _tmp=""
     fi
   else
-    echo "→ Обновление пакета opera-proxy${_want:+ ($_want)} ..."
-    if opkg install opera-proxy; then
-      # opkg мог сказать «up to date» при той же/новой версии — ок
-      echo "✅ Готово"
+    _tmp=""
+  fi
+
+  echo ""
+  if [ -n "$_tmp" ] && [ -s "$_tmp" ]; then
+    if [ -n "$_iv" ] && [ -n "$_want" ] && ver_gt "$_iv" "$_want"; then
+      echo "→ Понижение $_iv → $_want (IPK, --force-downgrade) ..."
+      _flags="--force-downgrade"
+    elif [ -n "$_iv" ]; then
+      echo "→ Установка/обновление $_want (IPK) ..."
+      _flags="--force-reinstall"
     else
-      echo "❌ Не удалось установить/обновить opera-proxy"
+      echo "→ Установка $_want (IPK) ..."
+      _flags=""
+    fi
+    if opkg install $_flags "$_tmp"; then
+      echo "✅ Готово${_want:+ ($_want)}"
+    elif opkg install --force-downgrade --force-reinstall "$_tmp"; then
+      echo "✅ Готово (force-downgrade+reinstall)"
+    else
+      echo "❌ opkg install $_ipk не удался"
+      rm -f "$_tmp"
       return 1
     fi
+    rm -f "$_tmp"
+  else
+    # fallback: только opkg из репозитория
+    if [ -n "$_iv" ] && [ -n "$_want" ] && ver_gt "$_iv" "$_want"; then
+      echo "→ Понижение $_iv → $_want (--force-downgrade) ..."
+      if ! opkg install --force-downgrade opera-proxy; then
+        echo "❌ Не удалось понизить (скачайте IPK вручную с sw.ext.io)"
+        return 1
+      fi
+      _nv=$(pkg_installed_ver)
+      if [ -n "$_want" ] && [ -n "$_nv" ] && ver_gt "$_nv" "$_want"; then
+        echo "❌ Версия не понизилась (осталась $_nv, нужна $_want)"
+        return 1
+      fi
+      echo "✅ Готово (downgrade → $_nv)"
+    elif [ -z "$_iv" ]; then
+      echo "→ Установка opera-proxy ..."
+      opkg install opera-proxy || { echo "❌ Не удалось установить"; return 1; }
+      echo "✅ Готово"
+    else
+      echo "→ Обновление opera-proxy ..."
+      opkg install opera-proxy || { echo "❌ Не удалось обновить"; return 1; }
+      echo "✅ Готово"
+    fi
   fi
+
   echo ""
   echo "→ Конфиг opera-proxy (SNI/DoH/COUNTRY) ..."
   write_opera_conf
-
   echo ""
   echo "→ Запуск сервиса ..."
   /opt/etc/init.d/S99opera-proxy restart 2>/dev/null \
