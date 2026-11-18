@@ -34,7 +34,10 @@
 #   1.3.34 — Fix: apply_api_proxy сохраняет PING_CHECK (не сбрасывает в default)
 #   1.3.35 — install: --force-downgrade при понижении версии (1.31→1.30)
 #   1.3.36 — official: скачивание IPK с sw.ext.io + force-downgrade (pin= не работает)
-MENU_VERSION="1.3.36"
+#   1.3.37 — маршруты Opera 77.111.244/247/24 через VPN (bat + ndmc), без API_PROXY
+#   1.3.38 — маршруты: только ndmc (без bat), имена туннелей в выборе, чистый remove
+#   1.3.39 — маршруты: auto + comment Opera; multi-iface ROUTE_VIA (failover)
+MENU_VERSION="1.3.39"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1804,6 +1807,312 @@ check_proxy() {
 }
 
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Маршруты Opera (Keenetic static → VPN), без API_PROXY
+# ndmc: ip route NET MASK WireguardN auto
+# comment "Opera" через RCI; ROUTE_VIA может быть "nwg0 nwg1" (failover)
+# ---------------------------------------------------------------------------
+OPERA_ROUTE_NETS_DEFAULT="77.111.247.0/24 77.111.244.0/24"
+OPERA_ROUTE_COMMENT="Opera"
+
+opera_route_nets() {
+  _n=$(conf_get ROUTE_NETS 2>/dev/null)
+  [ -n "$_n" ] || _n="$OPERA_ROUTE_NETS_DEFAULT"
+  printf '%s\n' "$_n"
+}
+
+opera_cidr_mask() {
+  case "$1" in
+    32) echo "255.255.255.255" ;;
+    24) echo "255.255.255.0" ;;
+    22) echo "255.255.252.0" ;;
+    16) echo "255.255.0.0" ;;
+    *)  echo "255.255.255.0" ;;
+  esac
+}
+
+opera_ndms_iface() {
+  case "$1" in
+    nwg[0-9]*) echo "Wireguard${1#nwg}" ;;
+    Wireguard[0-9]*) echo "$1" ;;
+    wireguard[0-9]*) echo "Wireguard${1#wireguard}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+opera_iface_up() {
+  _if="$1"
+  [ -n "$_if" ] && [ -e "/sys/class/net/$_if" ] || return 1
+  _st=$(cat "/sys/class/net/$_if/operstate" 2>/dev/null || echo down)
+  case "$_st" in up) return 0 ;; esac
+  command -v ip >/dev/null 2>&1 && ip -o link show "$_if" 2>/dev/null | grep -qE 'state UP|UP,' && return 0
+  return 1
+}
+
+opera_iface_label() {
+  _linux="$1"
+  _ndms=$(opera_ndms_iface "$_linux")
+  _lab=""
+  if command -v curl >/dev/null 2>&1; then
+    _js=$(curl -s -m 3 --connect-timeout 2 "http://127.0.0.1:79/rci/show/interface" 2>/dev/null || true)
+    if [ -n "$_js" ]; then
+      _lab=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\":\"$_ndms\"" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p' | head -1)
+      [ -z "$_lab" ] && _lab=$(printf '%s' "$_js" | sed -n "s/.*\"id\":\"$_ndms\"[^]]*\"description\":\"\([^\"]*\)\".*/\1/p" | head -1)
+      [ -z "$_lab" ] && _lab=$(printf '%s' "$_js" | sed -n "s/.*\"description\":\"\([^\"]*\)\"[^]]*\"id\":\"$_ndms\".*/\1/p" | head -1)
+    fi
+  fi
+  if [ -z "$_lab" ] && command -v ndmc >/dev/null 2>&1; then
+    _lab=$(ndmc -c "show interface $_ndms" 2>/dev/null | sed -n 's/.*description[: =]*//p' | head -1 | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  fi
+  printf '%s\n' "$_lab"
+}
+
+list_route_ifaces() {
+  for _p in /sys/class/net/nwg* /sys/class/net/Wireguard* /sys/class/net/wireguard*; do
+    [ -e "$_p" ] || continue
+    basename "$_p"
+  done 2>/dev/null | sort -u
+}
+
+# Одна сеть через один NDMS-iface: auto + comment Opera
+opera_route_add_one() {
+  # $1=ip $2=mask $3=WireguardN
+  _ip="$1"; _mask="$2"; _ndms="$3"
+  # 1) ndmc с auto (обязательно)
+  if ! ndmc -c "ip route $_ip $_mask $_ndms auto" 2>/dev/null; then
+    # fallback без auto
+    ndmc -c "ip route $_ip $_mask $_ndms" 2>/dev/null || return 1
+  fi
+  # 2) comment через RCI (не критично при ошибке)
+  if command -v curl >/dev/null 2>&1; then
+    _body="{\"ip\":{\"route\":{\"network\":\"$_ip\",\"mask\":\"$_mask\",\"interface\":\"$_ndms\",\"auto\":true,\"comment\":\"$OPERA_ROUTE_COMMENT\"}}}"
+    curl -s -m 5 --connect-timeout 2 -H "Content-Type: application/json" \
+      -d "$_body" "http://127.0.0.1:79/rci/" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+opera_route_del_one() {
+  _ip="$1"; _mask="$2"; _ndms="$3"
+  ndmc -c "no ip route $_ip $_mask $_ndms" 2>/dev/null
+}
+
+# $1 = список linux-iface через пробел ("nwg0" или "nwg0 nwg1")
+apply_opera_routes() {
+  _vias="$1"
+  [ -n "$_vias" ] || { echo "   ⚠ интерфейс не задан"; return 1; }
+  command -v ndmc >/dev/null 2>&1 || { echo "   ⚠ ndmc не найден"; return 1; }
+  _nets=$(opera_route_nets)
+  _ok=0
+  _saved=""
+  for _via in $_vias; do
+    [ -n "$_via" ] || continue
+    _ndms=$(opera_ndms_iface "$_via")
+    case "$_ndms" in
+      Wireguard[0-9]*) ;;
+      *) echo "   ⚠ пропуск $_via (не WireguardN: $_ndms)"; continue ;;
+    esac
+    echo "→ Маршруты Opera → $_ndms (linux: $_via, auto, rem $OPERA_ROUTE_COMMENT) ..."
+    for _cidr in $_nets; do
+      _ip="${_cidr%/*}"
+      _pref="${_cidr#*/}"
+      [ "$_ip" = "$_cidr" ] && _pref=24
+      _mask=$(opera_cidr_mask "$_pref")
+      if opera_route_add_one "$_ip" "$_mask" "$_ndms"; then
+        echo "   ✓ $_ip/$_pref → $_ndms auto · $OPERA_ROUTE_COMMENT"
+        _ok=1
+      else
+        echo "   ⚠ не удалось: $_ip $_mask $_ndms"
+      fi
+    done
+    _saved="$_saved $_via"
+  done
+  _saved=$(echo $_saved)
+  if [ "$_ok" = "1" ]; then
+    ndmc -c "system configuration save" 2>/dev/null || true
+    conf_set ROUTE_VIA "$_saved"
+    conf_set ROUTE_NETS "$(echo $(opera_route_nets))"
+    echo "   ✓ сохранено (ROUTE_VIA=$_saved)"
+    return 0
+  fi
+  return 1
+}
+
+remove_opera_routes() {
+  _via=$(conf_get ROUTE_VIA)
+  [ -z "$_via" ] && _via="$1"
+  command -v ndmc >/dev/null 2>&1 || { echo "   ⚠ ndmc не найден"; return 1; }
+  _nets=$(opera_route_nets)
+  echo "→ Снятие маршрутов Opera ..."
+  _ok=0
+  # по сохранённым iface
+  for _v in $_via; do
+    [ -n "$_v" ] || continue
+    _ndms=$(opera_ndms_iface "$_v")
+    case "$_ndms" in
+      Wireguard[0-9]*)
+        for _cidr in $_nets; do
+          _ip="${_cidr%/*}"
+          _pref="${_cidr#*/}"
+          [ "$_ip" = "$_cidr" ] && _pref=24
+          _mask=$(opera_cidr_mask "$_pref")
+          if opera_route_del_one "$_ip" "$_mask" "$_ndms"; then
+            echo "   ✓ no ip route $_ip $_mask $_ndms"
+            _ok=1
+          fi
+        done
+        ;;
+    esac
+  done
+  # fallback: все 77.111.244/247 Wireguard* из running-config
+  if [ "$_ok" != "1" ]; then
+    _rc=$(ndmc -c "show running-config" 2>/dev/null || true)
+    printf '%s\n' "$_rc" | awk '
+      $1=="ip" && $2=="route" && ($3 ~ /^77\.111\.247\./ || $3 ~ /^77\.111\.244\./) {
+        # ip route NET MASK IFACE [auto]
+        print $3, $4, $5
+      }' | while read -r _ip _mask _ifc; do
+        [ -n "$_ifc" ] || continue
+        case "$_ifc" in
+          Wireguard[0-9]*)
+            if opera_route_del_one "$_ip" "$_mask" "$_ifc"; then
+              echo "   ✓ no ip route $_ip $_mask $_ifc"
+            fi
+            ;;
+        esac
+      done
+  fi
+  ndmc -c "system configuration save" 2>/dev/null || true
+  conf_set ROUTE_VIA ""
+  echo "   ✓ ROUTE_VIA очищен"
+  return 0
+}
+
+# Мультивыбор: 1 или 1,2 или 1 2
+pick_route_iface() {
+  PICK_ROUTE_IFACE=""
+  _list=$(list_route_ifaces)
+  if [ -z "$_list" ]; then
+    echo "   ⚠ Нет nwg*/Wireguard* — поднимите WARP/VPN"
+    return 1
+  fi
+  echo "Доступные VPN-интерфейсы (можно несколько: 1,2 — failover при down):"
+  _i=0
+  _tmp="/tmp/opera-route-ifaces.$$"
+  : > "$_tmp"
+  for _ifc in $_list; do
+    _i=$((_i + 1))
+    _st="DOWN"
+    opera_iface_up "$_ifc" && _st="UP"
+    _ndms=$(opera_ndms_iface "$_ifc")
+    _name=$(opera_iface_label "$_ifc")
+    [ -z "$_name" ] && _name="—"
+    printf '  [%d]  %-10s  %-4s  %s  %s\n' "$_i" "$_ifc" "$_st" "$_ndms" "$_name"
+    echo "$_ifc" >> "$_tmp"
+  done
+  echo "  [0]  Отмена"
+  ask "Выбор (номер или 1,2): " "0"
+  case "$REPLY" in
+    0|"") rm -f "$_tmp"; return 1 ;;
+  esac
+  # разобрать 1,2 / 1 2 / 1
+  _sel=$(printf '%s' "$REPLY" | tr ',;' '  ')
+  _picked=""
+  for _n in $_sel; do
+    case "$_n" in *[!0-9]*|"") continue ;; esac
+    if [ "$_n" -ge 1 ] && [ "$_n" -le "$_i" ]; then
+      _ifc=$(sed -n "${_n}p" "$_tmp")
+      [ -n "$_ifc" ] && _picked="$_picked $_ifc"
+    else
+      echo "   ⚠ пропуск номера: $_n"
+    fi
+  done
+  rm -f "$_tmp"
+  _picked=$(echo $_picked)
+  if [ -z "$_picked" ]; then
+    echo "   Неверный выбор"
+    return 1
+  fi
+  PICK_ROUTE_IFACE="$_picked"
+  return 0
+}
+
+routes_menu() {
+  echo ""
+  printf '%b\n' "${bold}Маршруты Opera (77.111.244/247 → VPN, auto, без API_PROXY)${reset}"
+  _via=$(conf_get ROUTE_VIA)
+  _nets=$(opera_route_nets)
+  if [ -n "$_via" ]; then
+    _show=""
+    for _v in $_via; do
+      _show="$_show $_v→$(opera_ndms_iface "$_v")"
+    done
+    echo "   ROUTE_VIA :$(echo $_show)"
+  else
+    echo "   ROUTE_VIA : (выкл)"
+  fi
+  echo "   ROUTE_NETS: $_nets"
+  echo "   flags     : auto · comment $OPERA_ROUTE_COMMENT"
+  echo ""
+  echo "  [1] Выбрать интерфейс(ы) и применить маршруты"
+  echo "  [2] Снять маршруты Opera"
+  echo "  [3] Статус (running-config 77.111)"
+  echo "  [4] Отключить API_PROXY (рекомендуется с маршрутами)"
+  echo "  [0] Назад"
+  ask "Ваш выбор: " "0"
+  case "$REPLY" in
+    1)
+      if ! pick_route_iface; then
+        echo "   Отменено."
+        return 0
+      fi
+      _down=""
+      for _v in $PICK_ROUTE_IFACE; do
+        opera_iface_up "$_v" || _down="$_down $_v"
+      done
+      if [ -n "$_down" ]; then
+        printf '%b⚠ не UP:%s — registration может таймаутиться%b\n' "$yellow" "$_down" "$reset"
+        yes_no "Всё равно применить? [y/N]: " "n"
+        [ "$YESNO" = "1" ] || return 0
+      fi
+      apply_opera_routes "$PICK_ROUTE_IFACE"
+      _ap=$(conf_get_api_proxy 2>/dev/null)
+      if [ -n "$_ap" ]; then
+        echo ""
+        printf '%bСейчас API_PROXY=%s — с маршрутами обычно не нужен.%b\n' "$yellow" "$_ap" "$reset"
+        yes_no "Отключить API_PROXY? [Y/n]: " "y"
+        if [ "$YESNO" = "1" ]; then
+          conf_set_api_proxy ""
+          echo "   ✓ API_PROXY отключён — перезапустите сервис [s]"
+        fi
+      fi
+      ;;
+    2)
+      yes_no "Снять маршруты Opera и очистить ROUTE_VIA? [y/N]: " "n"
+      [ "$YESNO" = "1" ] && remove_opera_routes
+      ;;
+    3)
+      echo ""
+      if command -v ndmc >/dev/null 2>&1; then
+        echo "──── running-config (77.111 / ip route) ────"
+        ndmc -c "show running-config" 2>/dev/null | grep -E '77\.111\.|ip route' | head -40 | sed 's/^/  /' || echo "  (нет совпадений)"
+      else
+        echo "   ndmc не найден"
+      fi
+      ;;
+    4)
+      conf_set_api_proxy ""
+      printf '%b✓ API_PROXY отключён%b\n' "$green" "$reset"
+      echo "   Перезапуск: [s] или п.[4]"
+      ;;
+    *)
+      echo "   Назад."
+      ;;
+  esac
+}
+
+
 # [6] Настройка конфига (/opt/etc/opera-proxy.conf)
 # ---------------------------------------------------------------------------
 
@@ -1838,6 +2147,12 @@ API_PROXY=""
 
 # Ping-check интерфейса: default | custom (профиль = имя ProxyN → 9.9.9.9:53)
 PING_CHECK="default"
+
+# Маршруты Opera (Keenetic static → VPN-интерфейс). Пустой ROUTE_VIA = выкл.
+# Предпочтительно без API_PROXY: control/data plane 77.111.* идёт через VPN (nwg/awg).
+ROUTE_VIA=""
+# несколько iface через пробел: "nwg0 nwg1" — failover (auto)
+ROUTE_NETS="77.111.247.0/24 77.111.244.0/24"
 
 # ── OPTIONS для Entware init.d / rc.func (пересобирается меню при изменениях) ──
 OPTIONS="-socks-mode -country EU -bind-address 127.0.0.1:18080 -server-selection random -verbosity 30 -bootstrap-dns https://dns.google/dns-query,https://1.1.1.1/dns-query -fake-SNI 2gis.com"
@@ -2153,6 +2468,14 @@ config_menu() {
     else
       printf "  %-14s: %bdefault%b\n" "PING_CHECK" "$bold" "$reset"
     fi
+    _rvia=$(conf_get ROUTE_VIA)
+    _rnets=$(conf_get ROUTE_NETS)
+    [ -z "$_rnets" ] && _rnets="$OPERA_ROUTE_NETS_DEFAULT"
+    if [ -n "$_rvia" ]; then
+      printf "  %-14s: %b%s%b  →  %s\n" "ROUTE_VIA" "$green" "$_rvia" "$reset" "$_rnets"
+    else
+      printf "  %-14s: %b(выкл)%b  — пункт [r]\n" "ROUTE_VIA" "$light_blue" "$reset"
+    fi
     echo ""
     printf '%b\n' "${light_blue}──────────────────────────────────────${reset}"
     echo ""
@@ -2165,6 +2488,7 @@ config_menu() {
     echo "  [7] Изменить VERBOSITY"
     echo "  [8] Изменить API_PROXY (socks5-апстрим)"
     echo "  [9] Изменить PING_CHECK (проверка канала)"
+    echo "  [r] Маршруты Opera (77.111 → VPN, без API_PROXY)"
     echo "  [l] Показать конфиг целиком"
     echo "  [s] Сохранить + перезапустить сервис"
     echo "  [x] Сбросить к конфигу по умолчанию"
@@ -2439,6 +2763,10 @@ _cc=$REPLY
         esac
         sleep 2
         ;;
+      r|R)
+        routes_menu
+        ask "Нажмите Enter... " ""
+        ;;
       l|L)
         echo ""
         printf '%b\n' "${light_blue}───── $OP_CONF_FILE ─────${reset}"
@@ -2557,6 +2885,15 @@ remove_opera_proxy() {
   else
     echo ""
     echo "Репозиторий sw.ext.io.conf не найден — пропускаем."
+  fi
+
+  # Маршруты Opera (static 77.111.*)
+  if [ -n "$(conf_get ROUTE_VIA 2>/dev/null)" ]; then
+    echo ""
+    yes_no "Снять маршруты Opera (77.111.* → VPN)? [Y/n]: " "y"
+    if [ "$YESNO" = "1" ]; then
+      remove_opera_routes
+    fi
   fi
 
   # Опционально: fix-скрипт и cron
