@@ -37,7 +37,8 @@
 #   1.3.37 — маршруты Opera 77.111.244/247/24 через VPN (bat + ndmc), без API_PROXY
 #   1.3.38 — маршруты: только ndmc (без bat), имена туннелей в выборе, чистый remove
 #   1.3.39 — маршруты: auto + comment Opera; multi-iface ROUTE_VIA (failover)
-MENU_VERSION="1.3.39"
+#   1.3.40 — маршруты: nwg/Wireguard/opkgtun/awg с global; фильтр RCI
+MENU_VERSION="1.3.40"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -1834,10 +1835,14 @@ opera_cidr_mask() {
 
 opera_ndms_iface() {
   case "$1" in
-    nwg[0-9]*) echo "Wireguard${1#nwg}" ;;
+    nwg[0-9]*)       echo "Wireguard${1#nwg}" ;;
     Wireguard[0-9]*) echo "$1" ;;
     wireguard[0-9]*) echo "Wireguard${1#wireguard}" ;;
-    *) echo "$1" ;;
+    opkgtun[0-9]*)   echo "OpkgTun${1#opkgtun}" ;;
+    OpkgTun[0-9]*)   echo "$1" ;;
+    awgm[0-9]*)      echo "$1" ;;
+    awg[0-9]*)       echo "$1" ;;
+    *)               echo "$1" ;;
   esac
 }
 
@@ -1868,11 +1873,54 @@ opera_iface_label() {
   printf '%s\n' "$_lab"
 }
 
+# global=true из RCI show/interface (Wireguard / OpkgTun / …)
+# Печатает linux-имена; без RCI — все найденные в sysfs
 list_route_ifaces() {
-  for _p in /sys/class/net/nwg* /sys/class/net/Wireguard* /sys/class/net/wireguard*; do
+  _sys=""
+  for _p in /sys/class/net/nwg* /sys/class/net/awg* /sys/class/net/awgm* \
+            /sys/class/net/opkgtun* /sys/class/net/Wireguard* /sys/class/net/wireguard* \
+            /sys/class/net/OpkgTun*; do
     [ -e "$_p" ] || continue
-    basename "$_p"
-  done 2>/dev/null | sort -u
+    _sys="$_sys $(basename "$_p")"
+  done
+  _sys=$(printf '%s\n' $_sys | sort -u)
+
+  _js=""
+  command -v curl >/dev/null 2>&1 && \
+    _js=$(curl -s -m 3 --connect-timeout 2 "http://127.0.0.1:79/rci/show/interface" 2>/dev/null || true)
+
+  if [ -z "$_js" ]; then
+    printf '%s\n' $_sys
+    return 0
+  fi
+
+  # linux-имена, у которых NDMS-id имеет global true (или global отсутствует = true)
+  _out=""
+  for _ifc in $_sys; do
+    _ndms=$(opera_ndms_iface "$_ifc")
+    # вырезать объект/фрагмент с этим id
+    _frag=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\":\"$_ndms\"" | head -1)
+    [ -z "$_frag" ] && _frag=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\": \"$_ndms\"" | head -1)
+    if [ -n "$_frag" ]; then
+      # explicit false → skip
+      case "$_frag" in
+        *"\"global\":false"*|*"\"global\": false"*) continue ;;
+      esac
+      _out="$_out $_ifc"
+    else
+      # нет в RCI (чистый linux awg*) — оставляем, если интерфейс up
+      case "$_ifc" in
+        awg*|awgm*) _out="$_out $_ifc" ;;
+      esac
+    fi
+  done
+  _out=$(printf '%s\n' $_out | tr ' ' '\n' | grep -v '^$' | sort -u)
+  if [ -z "$_out" ]; then
+    # fallback: всё из sysfs
+    printf '%s\n' $_sys
+  else
+    printf '%s\n' $_out
+  fi
 }
 
 # Одна сеть через один NDMS-iface: auto + comment Opera
@@ -1910,8 +1958,8 @@ apply_opera_routes() {
     [ -n "$_via" ] || continue
     _ndms=$(opera_ndms_iface "$_via")
     case "$_ndms" in
-      Wireguard[0-9]*) ;;
-      *) echo "   ⚠ пропуск $_via (не WireguardN: $_ndms)"; continue ;;
+      Wireguard[0-9]*|OpkgTun[0-9]*|awg[0-9]*|awgm[0-9]*) ;;
+      *) echo "   ⚠ пропуск $_via (неподдерживаемый ndms: $_ndms)"; continue ;;
     esac
     echo "→ Маршруты Opera → $_ndms (linux: $_via, auto, rem $OPERA_ROUTE_COMMENT) ..."
     for _cidr in $_nets; do
@@ -1951,7 +1999,7 @@ remove_opera_routes() {
     [ -n "$_v" ] || continue
     _ndms=$(opera_ndms_iface "$_v")
     case "$_ndms" in
-      Wireguard[0-9]*)
+      Wireguard[0-9]*|OpkgTun[0-9]*|awg[0-9]*|awgm[0-9]*)
         for _cidr in $_nets; do
           _ip="${_cidr%/*}"
           _pref="${_cidr#*/}"
@@ -1975,7 +2023,7 @@ remove_opera_routes() {
       }' | while read -r _ip _mask _ifc; do
         [ -n "$_ifc" ] || continue
         case "$_ifc" in
-          Wireguard[0-9]*)
+          Wireguard[0-9]*|OpkgTun[0-9]*)
             if opera_route_del_one "$_ip" "$_mask" "$_ifc"; then
               echo "   ✓ no ip route $_ip $_mask $_ifc"
             fi
@@ -1994,7 +2042,7 @@ pick_route_iface() {
   PICK_ROUTE_IFACE=""
   _list=$(list_route_ifaces)
   if [ -z "$_list" ]; then
-    echo "   ⚠ Нет nwg*/Wireguard* — поднимите WARP/VPN"
+    echo "   ⚠ Нет VPN-интерфейсов (nwg/awg/opkgtun/Wireguard, global) — поднимите туннель"
     return 1
   fi
   echo "Доступные VPN-интерфейсы (можно несколько: 1,2 — failover при down):"

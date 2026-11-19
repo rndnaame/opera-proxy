@@ -7,7 +7,7 @@
 `menu-opera.sh` — интерактивный shell-скрипт для установки, настройки и диагностики
 [opera-proxy](https://github.com/Alexey71/opera-proxy) на роутерах Keenetic с Entware.
 
-![Version](https://img.shields.io/badge/меню-1.3.10-green?style=for-the-badge)
+![Version](https://img.shields.io/badge/меню-1.3.40-green?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/платформа-Keenetic%20%2F%20Entware-blue?style=for-the-badge)
 ![Shell](https://img.shields.io/badge/sh-posix%20(sh%2C%20ash%2C%20bash)-informational?style=for-the-badge&logo=gnubash&logoColor=white)
 ![License](https://img.shields.io/badge/статус-поддержка%20активна-brightgreen?style=for-the-badge)
@@ -222,6 +222,21 @@ logger -s -t test "проверка syslog"   # должна появиться 
 ---
 
 ## 📜 История версий меню (`menu-opera.sh`)
+
+### 1.3.40
+- Маршруты Opera: интерфейсы **nwg / Wireguard / opkgtun / awg** (только с **global**)
+- Фильтр списка по RCI `show/interface` (`global: false` скрывается)
+- NDMS-маппинг: `nwgN→WireguardN`, `opkgtunN→OpkgTunN`
+
+### 1.3.39
+- Маршруты: флаг **auto** («Добавлять автоматически») + comment **Opera** (RCI)
+- Multi-select интерфейсов (`1,2`) для failover при down одного из VPN
+
+### 1.3.38
+- Маршруты только через ndmc (без .bat), имена туннелей в выборе, чистый remove
+
+### 1.3.37
+- Маршруты Opera `77.111.244/24` + `77.111.247/24` через VPN без API_PROXY ([6]→[r])
 
 | Версия | Изменения |
 |--------|-----------|
