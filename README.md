@@ -7,7 +7,7 @@
 `menu-opera.sh` — интерактивный shell-скрипт для установки, настройки и диагностики
 [opera-proxy](https://github.com/Alexey71/opera-proxy) на роутерах Keenetic с Entware.
 
-![Version](https://img.shields.io/badge/меню-1.3.40-green?style=for-the-badge)
+![Version](https://img.shields.io/badge/меню-1.3.41-green?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/платформа-Keenetic%20%2F%20Entware-blue?style=for-the-badge)
 ![Shell](https://img.shields.io/badge/sh-posix%20(sh%2C%20ash%2C%20bash)-informational?style=for-the-badge&logo=gnubash&logoColor=white)
 ![License](https://img.shields.io/badge/статус-поддержка%20активна-brightgreen?style=for-the-badge)
@@ -191,6 +191,7 @@ ROUTE_NETS="77.111.247.0/24 77.111.244.0/24"
 
 | Версия | Изменения |
 |--------|-----------|
+| **1.3.41** | [6] конфиг: пункты в таблице ([1]…[9]/[P]/[R]) |
 | **1.3.40** | Маршруты: **nwg / Wireguard / opkgtun / awg**, фильтр RCI **global** |
 | **1.3.39** | Маршруты: **auto** + comment **Opera**; multi-iface failover (`1,2`) |
 | **1.3.38** | Только ndmc (без .bat); имена туннелей в выборе |

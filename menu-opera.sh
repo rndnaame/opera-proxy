@@ -38,7 +38,8 @@
 #   1.3.38 — маршруты: только ndmc (без bat), имена туннелей в выборе, чистый remove
 #   1.3.39 — маршруты: auto + comment Opera; multi-iface ROUTE_VIA (failover)
 #   1.3.40 — маршруты: nwg/Wireguard/opkgtun/awg с global; фильтр RCI
-MENU_VERSION="1.3.40"
+#   1.3.41 — [6] конфиг: пункты в таблице значений ([1]…[9]/[P]/[R])
+MENU_VERSION="1.3.41"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -2497,46 +2498,36 @@ config_menu() {
     _ping=$(conf_get PING_CHECK);          [ -z "$_ping" ] && _ping="default"
 
     printf '%b\n' "${light_blue}────────── Текущий конфиг ──────────${reset}"
-    printf "  %-14s: %b%s%b   (EU | AS | AM)\n" "COUNTRY" "$bold" "$_country" "$reset"
-    printf "  %-14s: %b%s%b\n" "BIND_ADDR" "$bold" "$_bindaddr" "$reset"
-    printf "  %-14s: %b%s%b\n" "BIND_PORT" "$bold" "$_bindport" "$reset"
-    printf "  %-14s: %b%s%b   (yes | no)\n" "OBFUSCATE" "$bold" "$_obf" "$reset"
-    printf "  %-14s: %b%s%b\n" "FAKE_SNI" "$bold" "$_sni" "$reset"
-    printf "  %-14s: %b%s%b\n" "BOOTSTRAP_DNS" "$bold" "$_doh" "$reset"
-    printf "  %-14s: %b%s%b   (random | fastest)\n" "SERVER_SELECT" "$bold" "$_srvsel" "$reset"
-    printf "  %-14s: %b%s%b   (10|20|30|40|50|60)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
+    printf "  [1] %-12s: %b%s%b   (EU | AS | AM)\n" "COUNTRY" "$bold" "$_country" "$reset"
+    printf "  [2] %-12s: %b%s%b\n" "BIND_ADDR" "$bold" "$_bindaddr" "$reset"
+    printf "  [3] %-12s: %b%s%b\n" "BIND_PORT" "$bold" "$_bindport" "$reset"
+    printf "  [4] %-12s: %b%s%b   (yes | no)\n" "OBFUSCATE" "$bold" "$_obf" "$reset"
+    printf "  [5] %-12s: %b%s%b\n" "FAKE_SNI" "$bold" "$_sni" "$reset"
+    printf "  [6] %-12s: %b%s%b\n" "BOOTSTRAP_DNS" "$bold" "$_doh" "$reset"
+    printf "  [7] %-12s: %b%s%b   (random | fastest)\n" "SERVER_SELECT" "$bold" "$_srvsel" "$reset"
+    printf "  [8] %-12s: %b%s%b   (10|20|30|40|50|60)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
     _api=$(conf_get_api_proxy)
     if [ -n "$_api" ]; then
-      printf "  %-14s: %bsocks5://%s%b\n" "API_PROXY" "$yellow" "$_api" "$reset"
+      printf "  [9] %-12s: %bsocks5://%s%b\n" "API_PROXY" "$yellow" "$_api" "$reset"
     else
-      printf "  %-14s: %b(не задан — прямое подключение)%b\n" "API_PROXY" "$light_blue" "$reset"
+      printf "  [9] %-12s: %b(не задан — прямое подключение)%b\n" "API_PROXY" "$light_blue" "$reset"
     fi
     if [ "$_ping" = "custom" ]; then
-      printf "  %-14s: %bcustom%b  (профиль = имя ProxyN → 9.9.9.9:53)\n" "PING_CHECK" "$bold" "$reset"
+      printf "  [P] %-12s: %bcustom%b  (профиль = имя ProxyN → 9.9.9.9:53)\n" "PING_CHECK" "$bold" "$reset"
     else
-      printf "  %-14s: %bdefault%b\n" "PING_CHECK" "$bold" "$reset"
+      printf "  [P] %-12s: %bdefault%b\n" "PING_CHECK" "$bold" "$reset"
     fi
     _rvia=$(conf_get ROUTE_VIA)
     _rnets=$(conf_get ROUTE_NETS)
     [ -z "$_rnets" ] && _rnets="$OPERA_ROUTE_NETS_DEFAULT"
     if [ -n "$_rvia" ]; then
-      printf "  %-14s: %b%s%b  →  %s\n" "ROUTE_VIA" "$green" "$_rvia" "$reset" "$_rnets"
+      printf "  [R] %-12s: %b%s%b  →  %s\n" "ROUTE_VIA" "$green" "$_rvia" "$reset" "$_rnets"
     else
-      printf "  %-14s: %b(выкл)%b  — пункт [r]\n" "ROUTE_VIA" "$light_blue" "$reset"
+      printf "  [R] %-12s: %b(выкл)%b\n" "ROUTE_VIA" "$light_blue" "$reset"
     fi
     echo ""
     printf '%b\n' "${light_blue}──────────────────────────────────────${reset}"
     echo ""
-    echo "  [1] Изменить COUNTRY (регион)"
-    echo "  [2] Изменить BIND_ADDR (адрес)"
-    echo "  [3] Изменить BIND_PORT (порт)"
-    echo "  [4] Изменить OBFUSCATE + FAKE_SNI"
-    echo "  [5] Изменить BOOTSTRAP_DNS"
-    echo "  [6] Изменить SERVER_SELECT"
-    echo "  [7] Изменить VERBOSITY"
-    echo "  [8] Изменить API_PROXY (socks5-апстрим)"
-    echo "  [9] Изменить PING_CHECK (проверка канала)"
-    echo "  [r] Маршруты Opera (77.111 → VPN, без API_PROXY)"
     echo "  [l] Показать конфиг целиком"
     echo "  [s] Сохранить + перезапустить сервис"
     echo "  [x] Сбросить к конфигу по умолчанию"
@@ -2545,8 +2536,9 @@ config_menu() {
     printf '%b\n' "${light_blue}OPTIONS пересобирается автоматически при каждом изменении${reset}"
     echo ""
 
-ask "Выбор [1-9 / l / s / x / 0]: " "0"
-_cc=$REPLY
+    ask "Выбор [1-9 / p / r / l / s / x / 0]: " "0"
+
+    _cc=$REPLY
     case "$_cc" in
       1)
         echo ""
@@ -2620,22 +2612,30 @@ _cc=$REPLY
         sleep 2
         ;;
       4)
+        echo ""
         ask "OBFUSCATE yes/no [$_obf]: " "$_obf"
         _v=$REPLY
         case "$_v" in
-          y|Y|yes|YES|д|Д) conf_set OBFUSCATE "yes"; printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset" ;;
-          n|N|no|NO|нет)   conf_set OBFUSCATE "no";  printf '%b✓ OBFUSCATE = no%b\n' "$green" "$reset" ;;
-          *) printf '%b⚠ Нужно yes или no%b\n' "$red" "$reset" ;;
+          y|Y|yes|YES|д|Д) conf_set OBFUSCATE "yes"; rebuild_options; printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset" ;;
+          n|N|no|NO|нет)   conf_set OBFUSCATE "no";  rebuild_options; printf '%b✓ OBFUSCATE = no%b\n' "$green" "$reset" ;;
+          *) echo "   Без изменений." ;;
         esac
-        ask "FAKE_SNI [$_sni]: " "$_sni"
-        _v=$REPLY
-        if [ -n "$_v" ]; then
-          conf_set FAKE_SNI "$_v"; printf '%b✓ FAKE_SNI = %s%b\n' "$green" "$_v" "$reset"
-        fi
-        rebuild_options
         sleep 1
         ;;
       5)
+        echo ""
+        ask "FAKE_SNI [$_sni]: " "$_sni"
+        _v=$REPLY
+        if [ -n "$_v" ]; then
+          conf_set FAKE_SNI "$_v"; rebuild_options
+          printf '%b✓ FAKE_SNI = %s%b\n' "$green" "$_v" "$reset"
+        else
+          echo "   Без изменений."
+        fi
+        sleep 1
+        ;;
+
+      6)
         ask "BOOTSTRAP_DNS [$_doh]: " "$_doh"
         _v=$REPLY
         case "$_v" in
@@ -2644,7 +2644,7 @@ _cc=$REPLY
         esac
         sleep 1
         ;;
-      6)
+      7)
         ask "SERVER_SELECT random/fastest [$_srvsel]: " "$_srvsel"
         _v=$REPLY
         case "$_v" in
@@ -2653,7 +2653,7 @@ _cc=$REPLY
         esac
         sleep 1
         ;;
-      7)
+      8)
         echo ""
         echo "Выберите уровень логирования (VERBOSITY):"
         echo "  [1] 10 — debug     (подробная отладка)"
@@ -2679,7 +2679,7 @@ _cc=$REPLY
         printf '%b✓ VERBOSITY = %s (%s)%b\n' "$green" "$_vu" "$(case $_vu in 10) echo debug;; 20) echo info;; 30) echo warn;; 40) echo error;; 50) echo critical;; 60) echo silent;; esac)" "$reset"
         sleep 1
         ;;
-      8)
+      9)
         echo ""
         printf '%b\n' "${bold}Изменить API_PROXY (socks5-апстрим для opera-proxy)${reset}"
         if [ -n "$_api" ]; then
@@ -2786,7 +2786,7 @@ _cc=$REPLY
         esac
         sleep 2
         ;;
-      9)
+      p|P)
         echo ""
         find_opera_iface 2>/dev/null || IFACE="Proxy0"
         echo "Ping-check для $IFACE (текущее: ${_ping:-default}):"
