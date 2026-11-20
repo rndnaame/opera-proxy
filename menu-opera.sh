@@ -42,7 +42,8 @@
 #   1.3.42 — статус Режим API/маршруты; [r] apply→API off+restart; iface без global в списке
 #   1.3.43 — FAKE_SNI: пресеты, авто OBFUSCATE=yes, опциональный тест SOCKS
 #   1.3.44 — test_socks_after_sni: ожидание registration (retry), без ложных FAIL
-MENU_VERSION="1.3.44"
+#   1.3.45 — FAKE_SNI: в таблице «не в OPTIONS» при OBFUSCATE=no; предупреждение
+MENU_VERSION="1.3.45"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -2587,7 +2588,11 @@ config_menu() {
     printf "  [2] %-12s: %b%s%b\n" "BIND_ADDR" "$bold" "$_bindaddr" "$reset"
     printf "  [3] %-12s: %b%s%b\n" "BIND_PORT" "$bold" "$_bindport" "$reset"
     printf "  [4] %-12s: %b%s%b   (yes | no)\n" "OBFUSCATE" "$bold" "$_obf" "$reset"
-    printf "  [5] %-12s: %b%s%b\n" "FAKE_SNI" "$bold" "$_sni" "$reset"
+    if [ "$_obf" = "yes" ]; then
+      printf "  [5] %-12s: %b%s%b   (в OPTIONS)\n" "FAKE_SNI" "$bold" "$_sni" "$reset"
+    else
+      printf "  [5] %-12s: %s  %b(не в OPTIONS — OBFUSCATE=no)%b\n" "FAKE_SNI" "$_sni" "$yellow" "$reset"
+    fi
     printf "  [6] %-12s: %b%s%b\n" "BOOTSTRAP_DNS" "$bold" "$_doh" "$reset"
     printf "  [7] %-12s: %b%s%b   (random | fastest)\n" "SERVER_SELECT" "$bold" "$_srvsel" "$reset"
     printf "  [8] %-12s: %b%s%b   (10|20|30|40|50|60)\n" "VERBOSITY" "$bold" "$_verb" "$reset"
@@ -2698,11 +2703,22 @@ config_menu() {
         ;;
       4)
         echo ""
+        _sni_now=$(conf_get FAKE_SNI 2>/dev/null); [ -z "$_sni_now" ] && _sni_now="2gis.com"
         ask "OBFUSCATE yes/no [$_obf]: " "$_obf"
         _v=$REPLY
         case "$_v" in
-          y|Y|yes|YES|д|Д) conf_set OBFUSCATE "yes"; rebuild_options; printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset" ;;
-          n|N|no|NO|нет)   conf_set OBFUSCATE "no";  rebuild_options; printf '%b✓ OBFUSCATE = no%b\n' "$green" "$reset" ;;
+          y|Y|yes|YES|д|Д)
+            conf_set OBFUSCATE "yes"; rebuild_options
+            printf '%b✓ OBFUSCATE = yes%b\n' "$green" "$reset"
+            printf '   → в OPTIONS: -fake-SNI %s\n' "$_sni_now"
+            ;;
+          n|N|no|NO|нет)
+            conf_set OBFUSCATE "no"; rebuild_options
+            printf '%b✓ OBFUSCATE = no%b\n' "$green" "$reset"
+            printf '%b⚠ -fake-SNI не применяется (FAKE_SNI=%s остаётся в conf, но не в OPTIONS)%b\n' \
+              "$yellow" "$_sni_now" "$reset"
+            echo "   Для маскировки DPI снова включите OBFUSCATE=yes или выберите SNI в [5]."
+            ;;
           *) echo "   Без изменений." ;;
         esac
         sleep 1
@@ -2710,7 +2726,12 @@ config_menu() {
       5)
         echo ""
         printf '%bFAKE_SNI%b (маскировка TLS ClientHello для DPI)\n' "$bold" "$reset"
-        echo "   Текущее: ${_sni:-2gis.com}   OBFUSCATE: ${_obf:-?}"
+        if [ "${_obf:-}" = "yes" ]; then
+          echo "   Текущее: ${_sni:-2gis.com}   OBFUSCATE: yes  → в OPTIONS"
+        else
+          printf '   Текущее: %s   OBFUSCATE: %s  %b→ НЕ в OPTIONS%b\n' \
+            "${_sni:-2gis.com}" "${_obf:-no}" "$yellow" "$reset"
+        fi
         echo ""
         echo "  [1] 2gis.com                 (дефолт РФ)"
         echo "  [2] spectrum.cloudflare.com"
