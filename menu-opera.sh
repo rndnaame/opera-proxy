@@ -39,7 +39,8 @@
 #   1.3.39 — маршруты: auto + comment Opera; multi-iface ROUTE_VIA (failover)
 #   1.3.40 — маршруты: nwg/Wireguard/opkgtun/awg с global; фильтр RCI
 #   1.3.41 — [6] конфиг: пункты в таблице значений ([1]…[9]/[P]/[R])
-MENU_VERSION="1.3.41"
+#   1.3.42 — статус Режим API/маршруты; [r] apply→API off+restart; iface без global в списке
+MENU_VERSION="1.3.42"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -193,6 +194,20 @@ show_status() {
     printf "   Автопочинка : %bвключена%b\n" "$green" "$reset"
   else
     printf "   Автопочинка : %bнет%b  (п.3 — починить туннель)\n" "$yellow" "$reset"
+  fi
+
+  # Режим: маршруты / API_PROXY / напрямую
+  _rvia=$(conf_get ROUTE_VIA 2>/dev/null || true)
+  _api_m=$(conf_get_api_proxy 2>/dev/null || true)
+  if [ -n "$_rvia" ]; then
+    _rnets=$(conf_get ROUTE_NETS 2>/dev/null || true)
+    [ -z "$_rnets" ] && _rnets="77.111.244/247"
+    printf "   Режим       : %bмаршруты%b  %s → %s\n" "$green" "$reset" "$_rnets" "$_rvia"
+    [ -n "$_api_m" ] && printf "                 %b+ API_PROXY socks5://%s%b (обычно лишний)\n" "$yellow" "$_api_m" "$reset"
+  elif [ -n "$_api_m" ]; then
+    printf "   Режим       : %bAPI_PROXY%b  socks5://%s\n" "$yellow" "$reset" "$_api_m"
+  else
+    printf "   Режим       : %bнапрямую%b  (без API_PROXY / маршрутов)\n" "$light_blue" "$reset"
   fi
   echo ""
 }
@@ -1876,6 +1891,22 @@ opera_iface_label() {
 
 # global=true из RCI show/interface (Wireguard / OpkgTun / …)
 # Печатает linux-имена; без RCI — все найденные в sysfs
+# 0 = global ok (true или нет поля); 1 = global false; 2 = нет в RCI
+opera_iface_global_status() {
+  _ifc="$1"
+  _js="${2:-}"
+  [ -n "$_js" ] || return 2
+  _ndms=$(opera_ndms_iface "$_ifc")
+  _frag=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\":\"$_ndms\"" | head -1)
+  [ -z "$_frag" ] && _frag=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\": \"$_ndms\"" | head -1)
+  [ -z "$_frag" ] && return 2
+  case "$_frag" in
+    *"\"global\":false"*|*"\"global\": false"*) return 1 ;;
+  esac
+  return 0
+}
+
+# Все VPN-iface из sysfs (nwg/awg/opkgtun/Wireguard…). Фильтр global — только подсказка в UI.
 list_route_ifaces() {
   _sys=""
   for _p in /sys/class/net/nwg* /sys/class/net/awg* /sys/class/net/awgm* \
@@ -1884,44 +1915,7 @@ list_route_ifaces() {
     [ -e "$_p" ] || continue
     _sys="$_sys $(basename "$_p")"
   done
-  _sys=$(printf '%s\n' $_sys | sort -u)
-
-  _js=""
-  command -v curl >/dev/null 2>&1 && \
-    _js=$(curl -s -m 3 --connect-timeout 2 "http://127.0.0.1:79/rci/show/interface" 2>/dev/null || true)
-
-  if [ -z "$_js" ]; then
-    printf '%s\n' $_sys
-    return 0
-  fi
-
-  # linux-имена, у которых NDMS-id имеет global true (или global отсутствует = true)
-  _out=""
-  for _ifc in $_sys; do
-    _ndms=$(opera_ndms_iface "$_ifc")
-    # вырезать объект/фрагмент с этим id
-    _frag=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\":\"$_ndms\"" | head -1)
-    [ -z "$_frag" ] && _frag=$(printf '%s' "$_js" | tr '}' '\n' | grep -F "\"id\": \"$_ndms\"" | head -1)
-    if [ -n "$_frag" ]; then
-      # explicit false → skip
-      case "$_frag" in
-        *"\"global\":false"*|*"\"global\": false"*) continue ;;
-      esac
-      _out="$_out $_ifc"
-    else
-      # нет в RCI (чистый linux awg*) — оставляем, если интерфейс up
-      case "$_ifc" in
-        awg*|awgm*) _out="$_out $_ifc" ;;
-      esac
-    fi
-  done
-  _out=$(printf '%s\n' $_out | tr ' ' '\n' | grep -v '^$' | sort -u)
-  if [ -z "$_out" ]; then
-    # fallback: всё из sysfs
-    printf '%s\n' $_sys
-  else
-    printf '%s\n' $_out
-  fi
+  printf '%s\n' $_sys | tr ' ' '\n' | grep -v '^$' | sort -u
 }
 
 # Одна сеть через один NDMS-iface: auto + comment Opera
@@ -2043,9 +2037,11 @@ pick_route_iface() {
   PICK_ROUTE_IFACE=""
   _list=$(list_route_ifaces)
   if [ -z "$_list" ]; then
-    echo "   ⚠ Нет VPN-интерфейсов (nwg/awg/opkgtun/Wireguard, global) — поднимите туннель"
+    echo "   ⚠ Нет VPN-интерфейсов (nwg/awg/opkgtun/Wireguard) — поднимите туннель"
     return 1
   fi
+  _js_rci=""
+  command -v curl >/dev/null 2>&1 &&     _js_rci=$(curl -s -m 3 --connect-timeout 2 "http://127.0.0.1:79/rci/show/interface" 2>/dev/null || true)
   echo "Доступные VPN-интерфейсы (можно несколько: 1,2 — failover при down):"
   _i=0
   _tmp="/tmp/opera-route-ifaces.$$"
@@ -2057,10 +2053,22 @@ pick_route_iface() {
     _ndms=$(opera_ndms_iface "$_ifc")
     _name=$(opera_iface_label "$_ifc")
     [ -z "$_name" ] && _name="—"
-    printf '  [%d]  %-10s  %-4s  %s  %s\n' "$_i" "$_ifc" "$_st" "$_ndms" "$_name"
+    _gmark=""
+    if [ -n "$_js_rci" ]; then
+      if opera_iface_global_status "$_ifc" "$_js_rci"; then
+        :
+      else
+        _gs=$?
+        if [ "$_gs" = "1" ]; then
+          _gmark="  (без global)"
+        fi
+      fi
+    fi
+    printf '  [%d]  %-10s  %-4s  %s  %s%s\n' "$_i" "$_ifc" "$_st" "$_ndms" "$_name" "$_gmark"
     echo "$_ifc" >> "$_tmp"
   done
   echo "  [0]  Отмена"
+  echo "  подсказка: «без global» — в веб-морде включите «использовать для выхода в интернет»"
   ask "Выбор (номер или 1,2): " "0"
   case "$REPLY" in
     0|"") rm -f "$_tmp"; return 1 ;;
@@ -2130,10 +2138,27 @@ routes_menu() {
       if [ -n "$_ap" ]; then
         echo ""
         printf '%bСейчас API_PROXY=%s — с маршрутами обычно не нужен.%b\n' "$yellow" "$_ap" "$reset"
-        yes_no "Отключить API_PROXY? [Y/n]: " "y"
+        yes_no "Отключить API_PROXY и перезапустить сервис? [Y/n]: " "y"
         if [ "$YESNO" = "1" ]; then
           conf_set_api_proxy ""
-          echo "   ✓ API_PROXY отключён — перезапустите сервис [s]"
+          rebuild_options 2>/dev/null || true
+          printf '%b✓ API_PROXY отключён%b\n' "$green" "$reset"
+          if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+            echo "→ /opt/etc/init.d/S99opera-proxy restart ..."
+            /opt/etc/init.d/S99opera-proxy restart
+            printf '%b✓ Сервис перезапущен%b\n' "$green" "$reset"
+          else
+            echo "   ⚠ init-скрипт не найден — перезапустите вручную [4]"
+          fi
+        fi
+      else
+        # маршруты есть, API уже выкл — предложить restart если сервис жив
+        if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+          yes_no "Перезапустить opera-proxy (подхватить маршруты)? [Y/n]: " "y"
+          if [ "$YESNO" = "1" ]; then
+            /opt/etc/init.d/S99opera-proxy restart
+            printf '%b✓ Сервис перезапущен%b\n' "$green" "$reset"
+          fi
         fi
       fi
       ;;
