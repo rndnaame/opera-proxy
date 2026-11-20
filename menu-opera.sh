@@ -40,7 +40,8 @@
 #   1.3.40 — маршруты: nwg/Wireguard/opkgtun/awg с global; фильтр RCI
 #   1.3.41 — [6] конфиг: пункты в таблице значений ([1]…[9]/[P]/[R])
 #   1.3.42 — статус Режим API/маршруты; [r] apply→API off+restart; iface без global в списке
-MENU_VERSION="1.3.42"
+#   1.3.43 — FAKE_SNI: пресеты, авто OBFUSCATE=yes, опциональный тест SOCKS
+MENU_VERSION="1.3.43"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -2489,6 +2490,49 @@ pick_socks5_pool() {
 }
 
 
+
+# Применить FAKE_SNI (+ всегда OBFUSCATE=yes). $1=domain
+apply_fake_sni() {
+  _dom="$1"
+  [ -n "$_dom" ] || return 1
+  # без схемы/пути
+  _dom=$(printf '%s' "$_dom" | sed 's#^https\?://##;s#/.*##;s/^www\.//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$_dom" ] || return 1
+  conf_set FAKE_SNI "$_dom"
+  conf_set OBFUSCATE "yes"
+  rebuild_options
+  printf '%b✓ FAKE_SNI = %s  ·  OBFUSCATE = yes%b\n' "$green" "$_dom" "$reset"
+}
+
+# Быстрая проверка локального SOCKS после смены SNI (10–15 с)
+test_socks_after_sni() {
+  _bp=$(conf_get BIND_PORT 2>/dev/null)
+  [ -z "$_bp" ] && _bp="18080"
+  if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+    echo "→ restart S99opera-proxy ..."
+    /opt/etc/init.d/S99opera-proxy restart 2>/dev/null || true
+    sleep 3
+  else
+    echo "   ⚠ init-скрипт не найден — тест без restart"
+  fi
+  echo "→ SOCKS 127.0.0.1:$_bp ..."
+  _ip=$(curl -s -m 12 --connect-timeout 6 --socks5-hostname "127.0.0.1:$_bp" \
+    "https://api.ipify.org" 2>/dev/null || true)
+  if echo "$_ip" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+    printf '%b✓ SOCKS OK  IP %s%b\n' "$green" "$_ip" "$reset"
+    _tg=$(curl -s -m 10 --connect-timeout 5 --socks5-hostname "127.0.0.1:$_bp" \
+      -o /dev/null -w "%{http_code}" "https://web.telegram.org" 2>/dev/null || echo "000")
+    if [ "$_tg" = "200" ] || [ "$_tg" = "301" ] || [ "$_tg" = "302" ]; then
+      printf '%b✓ Telegram OK (HTTP %s)%b\n' "$green" "$_tg" "$reset"
+      return 0
+    fi
+    printf '%b⚠ Telegram HTTP %s%b\n' "$yellow" "$_tg" "$reset"
+    return 0
+  fi
+  printf '%b✗ SOCKS не ответил — SNI/registration/API_PROXY?%b\n' "$red" "$reset"
+  return 1
+}
+
 config_menu() {
   print_banner
   printf '%b\n' "${bold}[6] Настройка конфига${reset}"
@@ -2649,13 +2693,71 @@ config_menu() {
         ;;
       5)
         echo ""
-        ask "FAKE_SNI [$_sni]: " "$_sni"
+        printf '%bFAKE_SNI%b (маскировка TLS ClientHello для DPI)\n' "$bold" "$reset"
+        echo "   Текущее: ${_sni:-2gis.com}   OBFUSCATE: ${_obf:-?}"
+        echo ""
+        echo "  [1] 2gis.com                 (дефолт РФ)"
+        echo "  [2] spectrum.cloudflare.com"
+        echo "  [3] www.cloudflare.com"
+        echo "  [4] yandex.ru"
+        echo "  [5] vk.com"
+        echo "  [6] ozon.ru"
+        echo "  [7] Свой домен"
+        echo "  [t] Перебор пресетов 1–6 (restart + SOCKS)"
+        echo "  [0] Отмена"
+        ask "Выбор: " "0"
         _v=$REPLY
-        if [ -n "$_v" ]; then
-          conf_set FAKE_SNI "$_v"; rebuild_options
-          printf '%b✓ FAKE_SNI = %s%b\n' "$green" "$_v" "$reset"
-        else
+        _chosen=""
+        case "$_v" in
+          1) _chosen="2gis.com" ;;
+          2) _chosen="spectrum.cloudflare.com" ;;
+          3) _chosen="www.cloudflare.com" ;;
+          4) _chosen="yandex.ru" ;;
+          5) _chosen="vk.com" ;;
+          6) _chosen="ozon.ru" ;;
+          7)
+            ask "Домен без https:// [$_sni]: " "$_sni"
+            _chosen=$REPLY
+            ;;
+          t|T)
+            echo "→ Перебор пресетов (остановка на первом OK) ..."
+            _ok=0
+            for _cand in 2gis.com spectrum.cloudflare.com www.cloudflare.com yandex.ru vk.com ozon.ru; do
+              echo ""
+              echo "── $_cand ──"
+              apply_fake_sni "$_cand" || continue
+              if test_socks_after_sni; then
+                _ok=1
+                break
+              fi
+            done
+            if [ "$_ok" = "1" ]; then
+              printf '%b✓ Подобран рабочий FAKE_SNI%b\n' "$green" "$reset"
+            else
+              printf '%b✗ Ни один пресет не дал SOCKS IP — смотрите API_PROXY / маршруты [r]%b\n' "$red" "$reset"
+            fi
+            sleep 2
+            continue
+            ;;
+          0|"")
+            echo "   Отменено."
+            sleep 1
+            continue
+            ;;
+          *)
+            # прямой ввод домена
+            _chosen="$_v"
+            ;;
+        esac
+        if [ -z "$_chosen" ]; then
           echo "   Без изменений."
+          sleep 1
+          continue
+        fi
+        apply_fake_sni "$_chosen"
+        yes_no "Перезапустить сервис и проверить SOCKS? [Y/n]: " "y"
+        if [ "$YESNO" = "1" ]; then
+          test_socks_after_sni || true
         fi
         sleep 1
         ;;
