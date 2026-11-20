@@ -41,7 +41,8 @@
 #   1.3.41 — [6] конфиг: пункты в таблице значений ([1]…[9]/[P]/[R])
 #   1.3.42 — статус Режим API/маршруты; [r] apply→API off+restart; iface без global в списке
 #   1.3.43 — FAKE_SNI: пресеты, авто OBFUSCATE=yes, опциональный тест SOCKS
-MENU_VERSION="1.3.43"
+#   1.3.44 — test_socks_after_sni: ожидание registration (retry), без ложных FAIL
+MENU_VERSION="1.3.44"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -2504,32 +2505,47 @@ apply_fake_sni() {
   printf '%b✓ FAKE_SNI = %s  ·  OBFUSCATE = yes%b\n' "$green" "$_dom" "$reset"
 }
 
-# Быстрая проверка локального SOCKS после смены SNI (10–15 с)
+# Проверка SOCKS после смены SNI: ждём registration/discover (до ~25 с)
+# $1 = skip_restart (1 — не рестартить, только опрос)
 test_socks_after_sni() {
   _bp=$(conf_get BIND_PORT 2>/dev/null)
   [ -z "$_bp" ] && _bp="18080"
-  if [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
+  _skip_rs="${1:-0}"
+  if [ "$_skip_rs" != "1" ] && [ -x "/opt/etc/init.d/S99opera-proxy" ]; then
     echo "→ restart S99opera-proxy ..."
     /opt/etc/init.d/S99opera-proxy restart 2>/dev/null || true
-    sleep 3
-  else
-    echo "   ⚠ init-скрипт не найден — тест без restart"
+    sleep 5
   fi
-  echo "→ SOCKS 127.0.0.1:$_bp ..."
-  _ip=$(curl -s -m 12 --connect-timeout 6 --socks5-hostname "127.0.0.1:$_bp" \
-    "https://api.ipify.org" 2>/dev/null || true)
-  if echo "$_ip" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-    printf '%b✓ SOCKS OK  IP %s%b\n' "$green" "$_ip" "$reset"
-    _tg=$(curl -s -m 10 --connect-timeout 5 --socks5-hostname "127.0.0.1:$_bp" \
-      -o /dev/null -w "%{http_code}" "https://web.telegram.org" 2>/dev/null || echo "000")
-    if [ "$_tg" = "200" ] || [ "$_tg" = "301" ] || [ "$_tg" = "302" ]; then
-      printf '%b✓ Telegram OK (HTTP %s)%b\n' "$green" "$_tg" "$reset"
+  echo "→ SOCKS 127.0.0.1:$_bp (ожидание init до ~25 с) ..."
+  _ip=""
+  _n=0
+  while [ "$_n" -lt 8 ]; do
+    _n=$((_n + 1))
+    # порт слушается?
+    if command -v netstat >/dev/null 2>&1; then
+      netstat -lnt 2>/dev/null | grep -q ":$_bp " || {
+        sleep 2
+        continue
+      }
+    fi
+    _ip=$(curl -s -m 8 --connect-timeout 4 --socks5-hostname "127.0.0.1:$_bp" \
+      "http://api.ipify.org" 2>/dev/null || true)
+    [ -z "$_ip" ] && _ip=$(curl -s -m 8 --connect-timeout 4 --socks5-hostname "127.0.0.1:$_bp" \
+      "https://api.ipify.org" 2>/dev/null || true)
+    if echo "$_ip" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+      printf '%b✓ SOCKS OK  IP %s  (попытка %s)%b\n' "$green" "$_ip" "$_n" "$reset"
+      _tg=$(curl -s -m 10 --connect-timeout 5 --socks5-hostname "127.0.0.1:$_bp" \
+        -o /dev/null -w "%{http_code}" "https://web.telegram.org" 2>/dev/null || echo "000")
+      if [ "$_tg" = "200" ] || [ "$_tg" = "301" ] || [ "$_tg" = "302" ]; then
+        printf '%b✓ Telegram OK (HTTP %s)%b\n' "$green" "$_tg" "$reset"
+      else
+        printf '%b⚠ Telegram HTTP %s (IP есть — SNI ок)%b\n' "$yellow" "$_tg" "$reset"
+      fi
       return 0
     fi
-    printf '%b⚠ Telegram HTTP %s%b\n' "$yellow" "$_tg" "$reset"
-    return 0
-  fi
-  printf '%b✗ SOCKS не ответил — SNI/registration/API_PROXY?%b\n' "$red" "$reset"
+    sleep 3
+  done
+  printf '%b✗ SOCKS не ответил за ~25 с — смотрите API_PROXY / маршруты [r] / логи%b\n' "$red" "$reset"
   return 1
 }
 

@@ -7,7 +7,7 @@
 `menu-opera.sh` — интерактивный shell-скрипт для установки, настройки и диагностики
 [opera-proxy](https://github.com/Alexey71/opera-proxy) на роутерах Keenetic с Entware.
 
-![Version](https://img.shields.io/badge/меню-1.3.43-green?style=for-the-badge)
+![Version](https://img.shields.io/badge/меню-1.3.44-green?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/платформа-Keenetic%20%2F%20Entware-blue?style=for-the-badge)
 ![Shell](https://img.shields.io/badge/sh-posix%20(sh%2C%20ash%2C%20bash)-informational?style=for-the-badge&logo=gnubash&logoColor=white)
 ![License](https://img.shields.io/badge/статус-поддержка%20активна-brightgreen?style=for-the-badge)
@@ -191,6 +191,7 @@ ROUTE_NETS="77.111.247.0/24 77.111.244.0/24"
 
 | Версия | Изменения |
 |--------|-----------|
+| **1.3.44** | test SOCKS после SNI: retry ~25 с (без ложных FAIL) |
 | **1.3.43** | FAKE_SNI: пресеты, авто OBFUSCATE, тест SOCKS / перебор |
 | **1.3.42** | статус: Режим API/маршруты; [r] apply → API off+restart; iface «без global» |
 | **1.3.41** | [6] конфиг: пункты в таблице ([1]…[9]/[P]/[R]) |
