@@ -48,13 +48,28 @@ jobs:
             path=$(echo "$pair" | cut -d'|' -f1)
             suffix=$(echo "$pair" | cut -d'|' -f2)
             gh_bin=$(echo "$pair" | cut -d'|' -f3)
-            ipk=$(curl -sL "$MIRROR/$path/" \
-              | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${suffix}\\.ipk" \
-              | sort -V | tail -1 || true)
+            # Packages.gz надёжнее HTML-листинга (JS/таймауты GHA)
+            ipk=$(
+              curl -fsSL -m 30 --connect-timeout 15 "$MIRROR/$path/Packages.gz" 2>/dev/null \
+                | gunzip 2>/dev/null \
+                | awk -v RS= '/^Package: opera-proxy(\n|$)/ { print }' \
+                | grep -m1 '^Filename:' \
+                | awk '{print $2}' || true
+            )
+            # fallback: HTML directory listing
+            if [ -z "$ipk" ]; then
+              ipk=$(
+                curl -fsSL -m 30 --connect-timeout 15 "$MIRROR/$path/" 2>/dev/null \
+                  | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${suffix}\\.ipk" \
+                  | sort -V | tail -1 || true
+              )
+            fi
             if [ -z "$ipk" ]; then
               echo "  skip mirror $path (пакет не найден)"
               continue
             fi
+            # Filename иногда без пути — только basename
+            ipk=$(basename "$ipk")
             v=$(echo "$ipk" | sed -n 's/^opera-proxy_\([^_]*\)_.*/\1/p')
             [ -n "$v" ] && MIRROR_VER="$v"
             # path|ipk|suffix|gh_bin
@@ -63,7 +78,8 @@ jobs:
           done
 
           if [ -z "$MIRROR_VER" ] || [ ! -s /tmp/wanted_src.txt ]; then
-            echo "❌ Не удалось определить версию opera-proxy на зеркале"
+            echo "❌ Не удалось определить версию opera-proxy на зеркале (Packages.gz + HTML)"
+            echo "   Проверьте доступность $MIRROR/*/Packages.gz с runner"
             exit 1
           fi
           MIRROR_BASE=$(echo "$MIRROR_VER" | sed 's/-[0-9][0-9]*$//')
@@ -215,7 +231,7 @@ jobs:
             echo ""
             echo "→ $want (каркас: $ipk)"
 
-            wget -q -O "work/$ipk" "$MIRROR/$path/$ipk"
+            wget -q -T 60 -O "work/$ipk" "$MIRROR/$path/$ipk" || curl -fL --connect-timeout 15 --max-time 90 -o "work/$ipk" "$MIRROR/$path/$ipk"
             [ -s "work/$ipk" ] || { echo "  ❌ скачивание IPK не удалось"; continue; }
 
             rm -rf work/repack
