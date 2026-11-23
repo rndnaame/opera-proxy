@@ -25,7 +25,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          MIRROR="https://sw.ext.io/ent"
+          # HTTP предпочтительнее: HTTPS к sw.ext.io часто таймаутит (GHA / РФ)
+          MIRROR="http://sw.ext.io/ent"
+          MIRROR_HTTPS="https://sw.ext.io/ent"
           OUR_REPO="${{ github.repository }}"
           UPSTREAM_REPO="Alexey71/opera-proxy"
           mkdir -p out work
@@ -48,22 +50,24 @@ jobs:
             path=$(echo "$pair" | cut -d'|' -f1)
             suffix=$(echo "$pair" | cut -d'|' -f2)
             gh_bin=$(echo "$pair" | cut -d'|' -f3)
-            # Packages.gz надёжнее HTML-листинга (JS/таймауты GHA)
-            ipk=$(
-              curl -fsSL -m 30 --connect-timeout 15 "$MIRROR/$path/Packages.gz" 2>/dev/null \
-                | gunzip 2>/dev/null \
-                | awk -v RS= '/^Package: opera-proxy(\n|$)/ { print }' \
-                | grep -m1 '^Filename:' \
-                | awk '{print $2}' || true
-            )
-            # fallback: HTML directory listing
-            if [ -z "$ipk" ]; then
+            # 1) Packages.gz (HTTP → HTTPS)  2) HTML-листинг
+            ipk=""
+            for _base in "$MIRROR" "$MIRROR_HTTPS"; do
               ipk=$(
-                curl -fsSL -m 30 --connect-timeout 15 "$MIRROR/$path/" 2>/dev/null \
+                curl -fsSL -m 25 --connect-timeout 10 "$_base/$path/Packages.gz" 2>/dev/null \
+                  | gunzip 2>/dev/null \
+                  | awk -v RS= '/^Package: opera-proxy(\n|$)/ { print }' \
+                  | grep -m1 '^Filename:' \
+                  | awk '{print $2}' || true
+              )
+              [ -n "$ipk" ] && break
+              ipk=$(
+                curl -fsSL -m 25 --connect-timeout 10 "$_base/$path/" 2>/dev/null \
                   | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${suffix}\\.ipk" \
                   | sort -V | tail -1 || true
               )
-            fi
+              [ -n "$ipk" ] && break
+            done
             if [ -z "$ipk" ]; then
               echo "  skip mirror $path (пакет не найден)"
               continue
@@ -231,7 +235,9 @@ jobs:
             echo ""
             echo "→ $want (каркас: $ipk)"
 
-            wget -q -T 60 -O "work/$ipk" "$MIRROR/$path/$ipk" || curl -fL --connect-timeout 15 --max-time 90 -o "work/$ipk" "$MIRROR/$path/$ipk"
+            if ! wget -q -T 60 -O "work/$ipk" "$MIRROR/$path/$ipk" 2>/dev/null; then
+              curl -fL --connect-timeout 12 --max-time 90 -o "work/$ipk" "$MIRROR/$path/$ipk" 2>/dev/null                 || curl -fL --connect-timeout 12 --max-time 90 -o "work/$ipk" "$MIRROR_HTTPS/$path/$ipk" 2>/dev/null                 || true
+            fi
             [ -s "work/$ipk" ] || { echo "  ❌ скачивание IPK не удалось"; continue; }
 
             rm -rf work/repack

@@ -43,7 +43,8 @@
 #   1.3.43 — FAKE_SNI: пресеты, авто OBFUSCATE=yes, опциональный тест SOCKS
 #   1.3.44 — test_socks_after_sni: ожидание registration (retry), без ложных FAIL
 #   1.3.45 — FAKE_SNI: в таблице «не в OPTIONS» при OBFUSCATE=no; предупреждение
-MENU_VERSION="1.3.45"
+#   1.3.46 — sw.ext.io: HTTP+Packages.gz, устойчивость к недоступности зеркала
+MENU_VERSION="1.3.46"
 
 # URL для самообновления (пункт 99)
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/rndnaame/opera-proxy/main/menu-opera.sh}"
@@ -472,23 +473,49 @@ check_tunnel_quick() {
 }
 
 # Версия / имя IPK на sw.ext.io (для ARCH). Выставляет MIRROR_VER, MIRROR_IPK
+# HTTP предпочтительнее HTTPS (у зеркала бывают таймауты на :443).
 fetch_mirror_ver() {
   _arch="$1"
   MIRROR_IPK=""
   MIRROR_VER=""
-  _list=$(curl -sL --connect-timeout 10 --max-time 20 "http://sw.ext.io/ent/${_arch}/" 2>/dev/null \
-    || curl -sL --connect-timeout 10 --max-time 20 "https://sw.ext.io/ent/${_arch}/" 2>/dev/null || true)
-  # предпочитаем IPK под текущий IPK_SUFFIX, иначе любой opera-proxy_*.ipk
-  if [ -n "$IPK_SUFFIX" ]; then
-    MIRROR_IPK=$(printf '%s\n' "$_list" \
-      | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}\\.ipk" \
-      | sort -V | tail -1)
+  # 1) Packages.gz — надёжнее HTML-листинга
+  for _base in "http://sw.ext.io/ent" "https://sw.ext.io/ent"; do
+    _fn=$(
+      curl -fsSL --connect-timeout 8 --max-time 20 "$_base/${_arch}/Packages.gz" 2>/dev/null \
+        | gunzip 2>/dev/null \
+        | awk -v RS= '/^Package: opera-proxy(\n|$)/ { print }' \
+        | grep -m1 '^Filename:' \
+        | awk '{print $2}' || true
+    )
+    if [ -n "$_fn" ]; then
+      MIRROR_IPK=$(basename "$_fn")
+      break
+    fi
+  done
+  # 2) HTML directory listing
+  if [ -z "$MIRROR_IPK" ]; then
+    _list=$(curl -sL --connect-timeout 8 --max-time 20 "http://sw.ext.io/ent/${_arch}/" 2>/dev/null \
+      || curl -sL --connect-timeout 8 --max-time 20 "https://sw.ext.io/ent/${_arch}/" 2>/dev/null || true)
+    if [ -n "$IPK_SUFFIX" ]; then
+      MIRROR_IPK=$(printf '%s\n' "$_list" \
+        | grep -oE "opera-proxy_[0-9][^\"'<> ]+_${IPK_SUFFIX}\\.ipk" \
+        | sort -V | tail -1)
+    fi
+    [ -z "$MIRROR_IPK" ] && MIRROR_IPK=$(printf '%s\n' "$_list" \
+      | grep -oE "opera-proxy_[0-9][^\"'<> ]+\\.ipk" \
+      | grep -v compressed | sort -V | tail -1)
   fi
-  [ -z "$MIRROR_IPK" ] && MIRROR_IPK=$(printf '%s\n' "$_list" \
-    | grep -oE "opera-proxy_[0-9][^\"'<> ]+\\.ipk" \
-    | grep -v compressed | sort -V | tail -1)
+  # отфильтровать несовпадение суффикса, если задан
+  if [ -n "$MIRROR_IPK" ] && [ -n "$IPK_SUFFIX" ]; then
+    case "$MIRROR_IPK" in
+      *"_${IPK_SUFFIX}.ipk") ;;
+      *)
+        # Packages.gz мог отдать «чужой» arch — перепроверим HTML
+        :
+        ;;
+    esac
+  fi
   [ -n "$MIRROR_IPK" ] && MIRROR_VER=$(echo "$MIRROR_IPK" | sed -n 's/^opera-proxy_\([^_]*\)_.*/\1/p')
-  # совместимость: печатаем версию (как раньше вызывали $(fetch_mirror_ver ...))
   echo "$MIRROR_VER"
 }
 
@@ -737,7 +764,8 @@ install_opera_menu() {
   if [ -n "$MIRROR_VER" ]; then
     echo "  [1]  С репозитория sw.ext.io   (${MIRROR_VER})"
   else
-    echo "  [1]  С репозитория sw.ext.io   (версия не определена)"
+    echo "  [1]  С репозитория sw.ext.io   (недоступно — зеркало/сеть?)"
+    echo "       http://sw.ext.io/ent/${ARCH}/"
   fi
   if [ -n "$UPX_VER" ]; then
     echo "  [2]  Сжатая версия UPX         (${UPX_VER})"
